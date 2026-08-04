@@ -14,6 +14,48 @@ from app.config import LOCAL_SYNC_ROOT
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 
+def _transfers_with_speed(progress) -> list:
+    """Build active_transfers list, computing per-file speed on the server.
+
+    The frontend can compute speed from transferred-byte delta between polls,
+    but that's unreliable when many transfers upload at similar rates (the
+    stale `transferred` value for in-flight files can stay constant while
+    server-side the bytes are flowing through the socket). Computing speed
+    server-side gives accurate per-file rates.
+
+    Returns a list of dicts, each augmented with a `speed` field in bytes/s.
+    """
+    now = time.time()
+    samples = SyncEngine._transfer_samples.setdefault(progress.task_id, {})
+    out = []
+    for t in progress.active_transfers.values():
+        prev = samples.get(t.transfer_id)
+        speed = 0.0
+        if prev is not None:
+            prev_bytes, prev_time = prev
+            dt = now - prev_time
+            if dt > 0:
+                delta = t.transferred - prev_bytes
+                if delta > 0:
+                    speed = delta / dt
+        samples[t.transfer_id] = (t.transferred, now)
+        out.append({
+            "transfer_id": t.transfer_id,
+            "file_path": t.file_path,
+            "action": t.action,
+            "file_size": t.file_size,
+            "transferred": t.transferred,
+            "speed": speed,
+        })
+    # Drop samples for transfers that ended so the dict doesn't grow
+    # unbounded across sync runs.
+    active_ids = set(progress.active_transfers.keys())
+    stale = [tid for tid in samples if tid not in active_ids]
+    for tid in stale:
+        samples.pop(tid, None)
+    return out
+
+
 class CreateTaskRequest(BaseModel):
     name: str
     connection_id: int
@@ -55,20 +97,11 @@ async def list_tasks():
                 "processed_files": progress.processed_files,
                 "failed_files": progress.failed_files,
                 "skipped_files": progress.skipped_files,
-                "transferred_bytes": progress.transferred_bytes,
-                "speed": progress.speed,
-                "active_transfers": [
-                    {
-                        "transfer_id": t.transfer_id,
-                        "file_path": t.file_path,
-                        "action": t.action,
-                        "file_size": t.file_size,
-                        "transferred": t.transferred,
-                    }
-                    for t in progress.active_transfers.values()
-                ],
-            }
-        result.append(task)
+            "transferred_bytes": progress.transferred_bytes,
+            "speed": progress.speed,
+            "active_transfers": _transfers_with_speed(progress),
+        }
+    result.append(task)
     return {"tasks": result}
 
 
@@ -87,16 +120,7 @@ async def get_task(task_id: int):
             "skipped_files": progress.skipped_files,
             "transferred_bytes": progress.transferred_bytes,
             "speed": progress.speed,
-            "active_transfers": [
-                {
-                    "transfer_id": t.transfer_id,
-                    "file_path": t.file_path,
-                    "action": t.action,
-                    "file_size": t.file_size,
-                    "transferred": t.transferred,
-                }
-                for t in progress.active_transfers.values()
-            ],
+            "active_transfers": _transfers_with_speed(progress),
         }
     return task
 

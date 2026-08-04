@@ -80,6 +80,11 @@ class SyncEngine:
     _stop_requested: set[int] = set()
     # Cancelled transfers: {task_id: set(transfer_id, ...)}
     _cancelled_transfers: dict[int, set[int]] = {}
+    # Per-transfer speed sampling: {task_id: {transfer_id: (bytes, time)}}
+    # Sampled on each API call to compute per-file speed without relying
+    # on the frontend's polling delta (frontend state is unreliable when
+    # multiple transfers of identical size are uploaded concurrently).
+    _transfer_samples: dict[int, dict[int, tuple]] = {}
 
     @classmethod
     def get_progress(cls, task_id: int) -> Optional[SyncProgress]:
@@ -247,6 +252,7 @@ class SyncEngine:
             cls._running_tasks.discard(task_id)
             cls._stop_requested.discard(task_id)
             cls._cancelled_transfers.pop(task_id, None)
+            cls._transfer_samples.pop(task_id, None)
             try:
                 await provider.close()
             except Exception:

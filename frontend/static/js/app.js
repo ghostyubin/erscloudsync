@@ -216,7 +216,6 @@ const App = {
 
         let transfersHtml = '';
         if (isActive && transfers.length > 0) {
-            const now = Date.now();
             transfersHtml = transfers.map(t => {
                 const pct = t.file_size > 0 ? Math.round(t.transferred / t.file_size * 100) : 0;
                 const actionIcon = t.action === 'upload' ? '⬆' : '⬇';
@@ -224,18 +223,12 @@ const App = {
                 const progressClass = t.action === 'upload' ? 'progress-fill-upload' : 'progress-fill-download';
                 const dirTagClass = t.action === 'upload' ? 'dir-tag-up' : 'dir-tag-down';
 
-                // Per-file speed calculation
-                const tid = t.transfer_id || t.file_path;
-                const prev = this._prevTransfers[tid];
-                let fileSpeed = 0;
-                if (prev && now > prev.time) {
-                    const dt = (now - prev.time) / 1000;
-                    const deltaBytes = t.transferred - prev.transferred;
-                    if (deltaBytes > 0 && dt > 0) {
-                        fileSpeed = deltaBytes / dt;
-                    }
-                }
-                this._prevTransfers[tid] = { transferred: t.transferred, time: now };
+                // Per-file speed is now computed server-side in the API
+                // endpoint (see _transfers_with_speed in app/api/tasks.py),
+                // which is far more accurate than computing on the frontend
+                // because the server can sample at any moment and the
+                // backend already tracks transferred bytes atomically.
+                const fileSpeed = t.speed || 0;
 
                 return `
                     <div class="transfer-widget">
