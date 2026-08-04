@@ -289,7 +289,8 @@ class Provider115(CloudProvider):
 
         # Upload to OSS with progress tracking
         with open(local_path, "rb") as f:
-            reader = ProgressReader(f, transfer=_transfer, base=0)
+            reader = ProgressReader(f, transfer=_transfer, base=0,
+                                    file_size=file_size)
             form = aiohttp.FormData()
             for k, v in oss_params.items():
                 form.add_field(k, str(v))
