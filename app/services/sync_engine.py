@@ -423,7 +423,8 @@ class SyncEngine:
                             return "skipped"
 
                         await provider.upload_file(op.local_path, op.remote_path,
-                            progress_callback=cls._make_callback(progress, transfer_id, task_id))
+                            progress_callback=cls._make_callback(progress, transfer_id, task_id),
+                            _transfer=transfer)
                         progress.transferred_bytes += file_size
                         await db.db_add_log(task_id, "upload", op.remote_path,
                             f"Uploaded {op.local_path}")

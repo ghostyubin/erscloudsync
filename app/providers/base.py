@@ -4,6 +4,44 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
 import time
+import io
+
+
+class ProgressReader(io.IOBase):
+    """File-like wrapper that updates transfer.transferred on every read().
+
+    aiohttp's IOBasePayload reads in 64KB chunks, so progress is reported
+    at 64KB granularity — frequent enough for real-time speed display
+    even when multiple files transfer concurrently.
+    """
+
+    def __init__(self, fileobj, transfer=None, base: int = 0):
+        super().__init__()
+        self._fileobj = fileobj
+        self._transfer = transfer
+        self._base = base
+        self._read_bytes = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, size: int = -1):
+        chunk = self._fileobj.read(size)
+        if chunk:
+            self._read_bytes += len(chunk)
+            if self._transfer:
+                self._transfer.transferred = self._base + self._read_bytes
+        return chunk
+
+    def seek(self, *args):
+        return self._fileobj.seek(*args)
+
+    def tell(self):
+        return self._fileobj.tell()
+
+    def close(self):
+        self._fileobj.close()
+        super().close()
 
 
 @dataclass

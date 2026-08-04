@@ -7,14 +7,14 @@ Uses cookie-based authentication.
 import aiohttp
 import asyncio
 import hashlib
+import io
 import json
 import os
 import time
 from typing import Optional
 from urllib.parse import urlencode
 
-from app.providers.base import CloudProvider, FileInfo, AuthResult
-from app.config import SYNC_CHUNK_SIZE
+from app.providers.base import CloudProvider, FileInfo, AuthResult, ProgressReader
 
 # API endpoints
 QR_LOGIN_URL = "https://qrcodeapi.115.com/api/1.0/web/1.0/poll"
@@ -22,6 +22,8 @@ QR_IMAGE_URL = "https://qrcodeapi.115.com/api/1.0/web/1.0/qrcode"
 FILES_API = "https://proapi.115.com/android/2.0/files"
 UPLOAD_INIT_URL = "https://proapi.115.com/android/2.0/upload/init"
 DOWNLOAD_URL = "https://proapi.115.com/android/2.0/files/download"
+
+DOWNLOAD_CHUNK_SIZE = 256 * 1024  # 256KB chunks for download progress reporting
 
 # Cookie keys we need
 COOKIE_KEYS = ["UID", "CID", "SEID", "KID"]
@@ -231,7 +233,7 @@ class Provider115(CloudProvider):
         return None
 
     async def upload_file(self, local_path: str, remote_path: str,
-                          progress_callback=None) -> bool:
+                          progress_callback=None, _transfer=None) -> bool:
         """Upload a local file to 115."""
         remote_path = self.normalize_path(remote_path)
         parent_path = self.parent_path(remote_path)
@@ -285,12 +287,13 @@ class Provider115(CloudProvider):
             if not upload_url:
                 raise RuntimeError(f"No upload URL in response: {data}")
 
-        # Upload to OSS
+        # Upload to OSS with progress tracking
         with open(local_path, "rb") as f:
+            reader = ProgressReader(f, transfer=_transfer, base=0)
             form = aiohttp.FormData()
             for k, v in oss_params.items():
                 form.add_field(k, str(v))
-            form.add_field("file", f, filename=filename)
+            form.add_field("file", reader, filename=filename)
 
             async with session.post(upload_url, data=form) as resp:
                 if resp.status not in (200, 204):
@@ -356,7 +359,7 @@ class Provider115(CloudProvider):
             if resp.status != 200:
                 raise RuntimeError(f"Download failed: HTTP {resp.status}")
             with open(local_path, "wb") as f:
-                async for chunk in resp.content.iter_chunked(SYNC_CHUNK_SIZE):
+                async for chunk in resp.content.iter_chunked(DOWNLOAD_CHUNK_SIZE):
                     f.write(chunk)
                     downloaded += len(chunk)
                     if progress_callback:

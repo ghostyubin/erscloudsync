@@ -7,6 +7,7 @@ Supports OAuth2 authorization and manual token entry.
 import aiohttp
 import asyncio
 import hashlib
+import io
 import json
 import os
 import time
@@ -14,8 +15,8 @@ import math
 from typing import Optional
 from urllib.parse import urlencode
 
-from app.providers.base import CloudProvider, FileInfo, AuthResult
-from app.config import BAIDU_APP_KEY, BAIDU_APP_SECRET, BAIDU_REDIRECT_URI, BAIDU_DEFAULT_APP_KEY, BAIDU_DEFAULT_APP_SECRET, BAIDU_OAUTH_TOOL_URL, SYNC_CHUNK_SIZE
+from app.providers.base import CloudProvider, FileInfo, AuthResult, ProgressReader
+from app.config import BAIDU_APP_KEY, BAIDU_APP_SECRET, BAIDU_REDIRECT_URI, BAIDU_DEFAULT_APP_KEY, BAIDU_DEFAULT_APP_SECRET, BAIDU_OAUTH_TOOL_URL
 from app import database as db
 
 # API endpoints
@@ -27,6 +28,7 @@ PCS_API_BASE = "https://d.pcs.baidu.com/rest/2.0/pcs"
 # Upload thresholds
 MAX_SIMPLE_UPLOAD_SIZE = 4 * 1024 * 1024  # 4MB - use simple upload below this
 BLOCK_SIZE = 4 * 1024 * 1024  # 4MB blocks for chunked upload
+DOWNLOAD_CHUNK_SIZE = 256 * 1024  # 256KB chunks for download progress reporting
 
 
 class BaiduProvider(CloudProvider):
@@ -211,7 +213,7 @@ class BaiduProvider(CloudProvider):
             return None
 
     async def upload_file(self, local_path: str, remote_path: str,
-                          progress_callback=None) -> bool:
+                          progress_callback=None, _transfer=None) -> bool:
         """Upload a local file to Baidu Pan.
 
         Uses simple upload for small files and chunked upload for large files.
@@ -232,9 +234,9 @@ class BaiduProvider(CloudProvider):
         # endpoint works with the current credentials, while the legacy
         # /pcs/file simple upload endpoint returns "file is not authorized".
         if file_size <= MAX_SIMPLE_UPLOAD_SIZE:
-            success = await self._simple_upload(local_path, remote_path)
+            success = await self._simple_upload(local_path, remote_path, progress_callback, _transfer=_transfer)
         else:
-            success = await self._chunked_upload(local_path, remote_path, file_size, progress_callback)
+            success = await self._chunked_upload(local_path, remote_path, file_size, progress_callback, _transfer=_transfer)
 
         if success and progress_callback:
             await progress_callback(file_size, file_size)
@@ -280,7 +282,8 @@ class BaiduProvider(CloudProvider):
                 md5_full.update(chunk)
         return md5_full.hexdigest(), md5_slice.hexdigest()
 
-    async def _simple_upload(self, local_path: str, remote_path: str) -> bool:
+    async def _simple_upload(self, local_path: str, remote_path: str,
+                             progress_callback=None, _transfer=None) -> bool:
         """Upload a small file using the chunked flow (single block).
 
         The legacy /pcs/file simple upload endpoint returns
@@ -289,20 +292,25 @@ class BaiduProvider(CloudProvider):
         but with just one block.
         """
         file_size = os.path.getsize(local_path)
-        return await self._chunked_upload(local_path, remote_path, file_size, None)
+        return await self._chunked_upload(local_path, remote_path, file_size, progress_callback, _transfer=_transfer)
 
     async def _chunked_upload(self, local_path: str, remote_path: str,
-                               file_size: int, progress_callback=None) -> bool:
+                               file_size: int, progress_callback=None,
+                               _transfer=None) -> bool:
         """Upload a large file using the precreate/upload/create flow."""
         num_blocks = math.ceil(file_size / BLOCK_SIZE)
-        block_md5_list = []
 
-        # Calculate block MD5s
-        with open(local_path, "rb") as f:
-            for i in range(num_blocks):
-                block_data = f.read(BLOCK_SIZE)
-                block_md5 = hashlib.md5(block_data).hexdigest()
-                block_md5_list.append(block_md5)
+        # Calculate block MD5s in a thread to avoid blocking the event loop
+        def _calc_md5s():
+            md5_list = []
+            with open(local_path, "rb") as f:
+                for i in range(num_blocks):
+                    block_data = f.read(BLOCK_SIZE)
+                    block_md5 = hashlib.md5(block_data).hexdigest()
+                    md5_list.append(block_md5)
+            return md5_list
+
+        block_md5_list = await asyncio.to_thread(_calc_md5s)
 
         # 1. Precreate
         await self._ensure_token()
@@ -337,6 +345,7 @@ class BaiduProvider(CloudProvider):
         with open(local_path, "rb") as f:
             for i in range(num_blocks):
                 block_data = f.read(BLOCK_SIZE)
+                block_len = len(block_data) if isinstance(block_data, bytes) else BLOCK_SIZE
                 part_params = {
                     "method": "upload",
                     "access_token": self.access_token,
@@ -345,8 +354,12 @@ class BaiduProvider(CloudProvider):
                     "uploadid": uploadid,
                     "partseq": i,
                 }
+                # Wrap block data in ProgressReader for 64KB-granularity progress
+                reader = ProgressReader(
+                    io.BytesIO(block_data), transfer=_transfer, base=uploaded
+                )
                 form = aiohttp.FormData()
-                form.add_field("file", block_data,
+                form.add_field("file", reader,
                                filename=f"block_{i}")
                 async with session.post(f"{PCS_API_BASE}/superfile2",
                                          params=part_params, data=form) as resp:
@@ -365,7 +378,7 @@ class BaiduProvider(CloudProvider):
                         raise RuntimeError(
                             f"Block {i} upload no md5 in response: {block_data_resp}")
 
-                uploaded += len(block_data) if isinstance(block_data, bytes) else BLOCK_SIZE
+                uploaded += block_len
                 if progress_callback:
                     await progress_callback(min(uploaded, file_size), file_size)
 
@@ -423,7 +436,7 @@ class BaiduProvider(CloudProvider):
             content_length = resp.headers.get("Content-Length", "0")
             file_size = int(content_length) if content_length.isdigit() else 0
             with open(local_path, "wb") as f:
-                async for chunk in resp.content.iter_chunked(SYNC_CHUNK_SIZE):
+                async for chunk in resp.content.iter_chunked(DOWNLOAD_CHUNK_SIZE):
                     f.write(chunk)
                     downloaded += len(chunk)
                     if progress_callback:

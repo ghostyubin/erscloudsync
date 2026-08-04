@@ -37,7 +37,6 @@ services:
       - BAIDU_REDIRECT_URI=oob
       # Sync settings
       - BAUDUSYNC_CONCURRENCY=3
-      - BAUDUSYNC_CHUNK_SIZE=8388608
     # Override command to use port 5566.
     # --log-level warning quiets uvicorn's access log; the frontend polls every 3s
     # and would otherwise flood logs with "200 OK" lines.
