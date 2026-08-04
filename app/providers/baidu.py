@@ -19,6 +19,60 @@ from app.providers.base import CloudProvider, FileInfo, AuthResult, ProgressRead
 from app.config import BAIDU_APP_KEY, BAIDU_APP_SECRET, BAIDU_REDIRECT_URI, BAIDU_DEFAULT_APP_KEY, BAIDU_DEFAULT_APP_SECRET, BAIDU_OAUTH_TOOL_URL
 from app import database as db
 
+
+class _BlockPayload(aiohttp.Payload):
+    """In-memory bytes payload that streams content with progress updates.
+
+    We can't use IOBasePayload for our block bytes because:
+    1. BytesIO has no fileno(), so IOBasePayload.size returns None
+       and aiohttp falls back to Transfer-Encoding: chunked.
+    2. Baidu superfile2 returns errno=31211 "transfer-encoding can't be
+       chunked" on chunked uploads.
+
+    We can't use BytesPayload because it writes everything in one shot,
+    giving no chance to update transfer.transferred between chunks.
+
+    This class sets _size explicitly (so aiohttp sends Content-Length) and
+    writes data in chunks of 64KB, updating transfer.transferred after
+    each chunk so the frontend computes real-time speed.
+    """
+
+    def __init__(self, data: bytes, transfer=None, base: int = 0,
+                 filename: str = None,
+                 content_type: str = "application/octet-stream"):
+        super().__init__(value=data, content_type=content_type,
+                         filename=filename)
+        self._size = len(data)
+        self._consumed = False
+        self._transfer = transfer
+        self._base = base
+        self._read_bytes = 0
+        self._body_data = data
+
+    async def write(self, writer):
+        await self.write_with_length(writer, None)
+
+    async def write_with_length(self, writer, content_length):
+        limit = self._size if content_length is None else content_length
+        pos = 0
+        while pos < limit:
+            end = pos + 65536
+            chunk = self._body_data[pos:end] if end < limit else self._body_data[pos:limit]
+            if not chunk:
+                break
+            await writer.write(bytes(chunk))
+            pos += len(chunk)
+            self._read_bytes = pos
+            if self._transfer is not None:
+                self._transfer.transferred = self._base + pos
+            # Yield to event loop so concurrent transfers and the polling
+            # task get a chance to run between our writes.
+            await asyncio.sleep(0)
+
+    def decode(self, encoding: str = "utf-8", errors: str = "strict") -> str:
+        return self._body_data.decode(encoding, errors)
+
+
 # API endpoints
 OAUTH_AUTHORIZE_URL = "https://openapi.baidu.com/oauth/2.0/authorize"
 OAUTH_TOKEN_URL = "https://openapi.baidu.com/oauth/2.0/token"
@@ -354,12 +408,19 @@ class BaiduProvider(CloudProvider):
                     "uploadid": uploadid,
                     "partseq": i,
                 }
-                # Wrap block data in ProgressReader for 64KB-granularity progress
-                reader = ProgressReader(
-                    io.BytesIO(block_data), transfer=_transfer, base=uploaded
+                # Use a custom Payload that streams with progress updates
+                # while sending a Content-Length header. Required because:
+                # - IOBasePayload falls back to chunked encoding (no fileno
+                #   on BytesIO), but Baidu superfile2 rejects chunked
+                #   with errno=31211.
+                # - BytesPayload writes everything in one shot with no
+                #   progress opportunity.
+                block_payload = _BlockPayload(
+                    block_data, transfer=_transfer, base=uploaded,
+                    filename=f"block_{i}",
                 )
                 form = aiohttp.FormData()
-                form.add_field("file", reader,
+                form.add_field("file", block_payload,
                                filename=f"block_{i}")
                 async with session.post(f"{PCS_API_BASE}/superfile2",
                                          params=part_params, data=form) as resp:

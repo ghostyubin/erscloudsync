@@ -13,17 +13,28 @@ class ProgressReader(io.IOBase):
     aiohttp's IOBasePayload reads in 64KB chunks, so progress is reported
     at 64KB granularity — frequent enough for real-time speed display
     even when multiple files transfer concurrently.
+
+    Subclasses IOBase and exposes __len__ so aiohttp uses Content-Length
+    instead of chunked Transfer-Encoding. Some cloud APIs (Baidu
+    superfile2) reject requests with `Transfer-Encoding: chunked`.
     """
 
-    def __init__(self, fileobj, transfer=None, base: int = 0):
+    def __init__(self, fileobj, transfer=None, base: int = 0,
+                 file_size: int = 0):
         super().__init__()
         self._fileobj = fileobj
         self._transfer = transfer
         self._base = base
+        self._file_size = file_size
         self._read_bytes = 0
 
     def readable(self) -> bool:
         return True
+
+    def __len__(self) -> int:
+        # Tell aiohttp the total payload size so it uses Content-Length
+        # rather than chunked Transfer-Encoding.
+        return self._file_size
 
     def read(self, size: int = -1):
         chunk = self._fileobj.read(size)
@@ -40,7 +51,10 @@ class ProgressReader(io.IOBase):
         return self._fileobj.tell()
 
     def close(self):
-        self._fileobj.close()
+        try:
+            self._fileobj.close()
+        except Exception:
+            pass
         super().close()
 
 
