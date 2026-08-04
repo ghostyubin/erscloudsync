@@ -123,8 +123,10 @@ class SyncScheduler:
                 self._handlers[task_id] = handler
                 logger.info(f"Task {task_id} watching {local_base} for changes")
 
-                # Also run an initial sync
-                await SyncEngine.sync_task(task_id)
+                # Run initial sync in background — don't block app startup.
+                # If we await here, uvicorn stays stuck on "Waiting for
+                # application startup" and never starts listening on the port.
+                asyncio.create_task(SyncEngine.sync_task(task_id))
 
     @staticmethod
     def _resolve_local_base(local_path: str) -> str:
