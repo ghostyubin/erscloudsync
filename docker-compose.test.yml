@@ -1,8 +1,17 @@
+# BauduSync - docker-compose for remote machines
+# Pulls pre-built multi-arch image from GitHub Container Registry
+#
+# Usage:
+#   1. docker login ghcr.io -u ghostyubin --token YOUR_GITHUB_TOKEN
+#   2. docker-compose -f docker-compose.test.yml up -d
+#
+# Update image: docker-compose -f docker-compose.test.yml pull && docker-compose -f docker-compose.test.yml up -d
+
 version: "3.8"
 
 services:
   baudusync:
-    image: baudusync:latest
+    image: ghcr.io/ghostyubin/erscloudsync:latest
     container_name: baudusync
     restart: unless-stopped
     ports:
@@ -22,4 +31,3 @@ services:
       - BAUDUSYNC_DOWNLOAD_DIR=/downloads
       - BAUDUSYNC_CONCURRENCY=3
       - BAUDUSYNC_CHUNK_SIZE=8388608
-    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5566", "--workers", "1"]
