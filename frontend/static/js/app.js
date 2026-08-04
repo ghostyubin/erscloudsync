@@ -1256,21 +1256,26 @@ const App = {
 
     // ---- Progress Polling ----
     startProgressPolling() {
-        if (this.progressTimer) clearInterval(this.progressTimer);
-        this.progressTimer = setInterval(() => {
+        if (this.progressTimer) clearTimeout(this.progressTimer);
+        const tick = async () => {
             if (this.currentView === 'dashboard') {
-                this.loadDashboard();
+                await this.loadDashboard();
             } else if (this.currentView === 'tasks') {
-                this.loadTasks();
+                await this.loadTasks();
             } else if (this.currentView === 'downloads') {
                 this.loadDownloads();
             } else if (this.currentView === 'logs') {
                 this.loadLogs(true);
             } else if (this.currentView === 'settings') {
-                // Refresh active counts + connection card status
                 this.refreshSettingsActiveCounts();
             }
-        }, 3000);
+            // Adaptive interval: 1s when sync running (smooth speed/progress),
+            // 3s when idle (less noise)
+            const hasRunning = (this.tasks || []).some(t => t.is_running);
+            const interval = hasRunning ? 1000 : 3000;
+            this.progressTimer = setTimeout(tick, interval);
+        };
+        this.progressTimer = setTimeout(tick, 1000);
     },
 
     async refreshSettingsActiveCounts() {
