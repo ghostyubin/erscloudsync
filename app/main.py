@@ -25,6 +25,10 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+# Quiet down uvicorn's access log. The frontend polls /api/tasks, /api/logs,
+# /api/system/info every 3s which would otherwise flood the log file with
+# "200 OK" lines and make real issues hard to spot. We still log 4xx/5xx.
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -131,5 +135,5 @@ if __name__ == "__main__":
         host=WEB_HOST,
         port=WEB_PORT,
         reload=False,
-        log_level="info",
+        log_level="warning",
     )
