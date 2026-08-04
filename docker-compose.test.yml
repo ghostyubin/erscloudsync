@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  baudusync:
+    image: baudusync:latest
+    container_name: baudusync
+    restart: unless-stopped
+    ports:
+      - "5566:5566"
+    volumes:
+      # 配置目录（数据库、日志）- 持久化，必须挂载
+      - ./config:/config
+      # 同步目录 - 挂载你的存储路径
+      - ./sync:/sync
+      # 下载目录 - 从网盘下载的文件存放处
+      - ./downloads:/downloads
+    environment:
+      - BAUDUSYNC_HOST=0.0.0.0
+      - BAUDUSYNC_PORT=5566
+      - BAUDUSYNC_DATA_DIR=/config
+      - BAUDUSYNC_SYNC_ROOT=/sync
+      - BAUDUSYNC_DOWNLOAD_DIR=/downloads
+      - BAUDUSYNC_CONCURRENCY=3
+      - BAUDUSYNC_CHUNK_SIZE=8388608
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5566", "--workers", "1"]

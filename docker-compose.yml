@@ -1,0 +1,42 @@
+# BauduSync - docker-compose.yml
+# Cloud sync for NAS (Baidu Netdisk & 115 Netdisk)
+#
+# Usage:
+#   docker-compose up -d
+#
+# For OpenWrt / lightweight NAS systems, adjust volumes as needed.
+
+version: "3.8"
+
+services:
+  baudusync:
+    image: baudusync:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: baudusync
+    restart: unless-stopped
+    ports:
+      - "5566:5566"
+    volumes:
+      # Config directory (database, config) - persistent
+      - /vol1/1000/docker/baudusync:/config
+      # Sync directory - mount your NAS storage here
+      - /vol1/1000/sync:/sync
+      # Downloads directory - for files downloaded from cloud
+      - /vol1/1000/downloads:/downloads
+    environment:
+      - BAUDUSYNC_HOST=0.0.0.0
+      - BAUDUSYNC_PORT=5566
+      - BAUDUSYNC_DATA_DIR=/config
+      - BAUDUSYNC_SYNC_ROOT=/sync
+      - BAUDUSYNC_DOWNLOAD_DIR=/downloads
+      # Baidu OAuth (optional - users can also input tokens directly)
+      - BAIDU_APP_KEY=
+      - BAIDU_APP_SECRET=
+      - BAIDU_REDIRECT_URI=oob
+      # Sync settings
+      - BAUDUSYNC_CONCURRENCY=3
+      - BAUDUSYNC_CHUNK_SIZE=8388608
+    # Override command to use port 5566
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5566", "--workers", "1"]

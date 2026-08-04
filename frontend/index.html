@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BauduSync - NAS 云同步</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div id="app">
+    <!-- Sidebar -->
+    <nav class="sidebar">
+        <div class="sidebar-header">
+            <svg class="logo" viewBox="0 0 24 24" width="28" height="28">
+                <path fill="currentColor" d="M19.35 10.04C18.67 6.59 15.64 4 12 4c-1.48 0-2.85.43-4.01 1.17l1.46 1.46C10.21 6.23 11.08 6 12 6c2.76 0 5 2.24 5 5v1h2c1.66 0 3 1.34 3 3 0 .84-.35 1.59-.91 2.14l1.42 1.42C23.04 17.64 23.5 16.37 23.5 15c0-2.76-2.24-5-5-5h-.15zM3 5.27l2.75 2.74C4.09 8.86 3 10.79 3 13c0 3.31 2.69 6 6 6h2v-2H9c-2.21 0-4-1.79-4-4 0-1.95 1.4-3.57 3.25-3.92L10.27 9H4c-.55 0-1 .45-1 1v8c0 .55.45 1 1 1h14c.55 0 1-.45 1-1v-1.27L21.73 24 23 22.73 4.27 4 3 5.27z"/>
+            </svg>
+            <span class="sidebar-title">BauduSync</span>
+        </div>
+        <ul class="nav-list">
+            <li class="nav-group-label">功能</li>
+            <li class="nav-item active" data-view="dashboard">
+                <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z"/></svg>
+                <span>同步任务</span>
+            </li>
+            <li class="nav-item" data-view="cloud-files">
+                <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M19.35 10.04C18.67 6.59 15.64 4 12 4c-1.48 0-2.85.43-4.01 1.17l1.46 1.46C10.21 6.23 11.08 6 12 6c2.76 0 5 2.24 5 5v1h2c1.66 0 3 1.34 3 3 0 .84-.35 1.59-.91 2.14l1.42 1.42C23.04 17.64 23.5 16.37 23.5 15c0-2.76-2.24-5-5-5h-.15zM12 17.83c-2.21 0-4-1.79-4-4 0-1.45.78-2.73 1.94-3.45C9.97 7.4 13.39 8 14.5 10.5c1.5.5 2.5 1.83 2.5 3.33 0 2.21-1.79 4-4 4z"/></svg>
+                <span>网盘文件</span>
+            </li>
+            <li class="nav-item" data-view="downloads">
+                <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M16 17.01V10h-2v7.01h-3L15 21l4-3.99h-3zM9 3L5 6.99h3V14h2V6.99h3L9 3z"/><path fill="currentColor" d="M5 20h14v-2H5v2z"/></svg>
+                <span>下载任务</span>
+            </li>
+            <li class="nav-group-label">系统</li>
+            <li class="nav-item" data-view="settings">
+                <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94 0 .31.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+                <span>全局设置</span>
+            </li>
+            <li class="nav-item" data-view="about">
+                <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>
+                <span>关于</span>
+            </li>
+        </ul>
+        <div class="sidebar-footer">
+            <div class="storage-bar-area">
+                <div class="storage-bar-row">
+                    <span id="disk-usage-text">磁盘</span>
+                </div>
+                <div class="storage-bar-track">
+                    <div class="storage-bar-fill" id="disk-bar-fill" style="width:0%"></div>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main content -->
+    <main class="main-content">
+        <!-- Dashboard View -->
+        <div id="view-dashboard" class="view active">
+            <div class="page-topbar">
+                <h1 class="page-title">同步任务</h1>
+                <div class="topbar-actions">
+                    <button class="btn-refresh" title="刷新" onclick="app.loadDashboard()">
+                        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                    </button>
+                    <button class="btn-add" onclick="app.openCreateTaskDialog()">
+                        <span style="font-size:18px;font-weight:300;line-height:1;margin-right:2px">+</span>
+                        新建任务
+                    </button>
+                </div>
+            </div>
+            <div class="stats-grid" id="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-icon stat-icon-sync">
+                        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M16 17.01V10h-2v7.01h-3L15 21l4-3.99h-3zM9 3L5 6.99h3V14h2V6.99h3L9 3z"/></svg>
+                    </div>
+                    <div>
+                        <div class="stat-label">同步任务</div>
+                        <div class="stat-num stat-num-default" id="stat-tasks">0</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon stat-icon-up">
+                        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/></svg>
+                    </div>
+                    <div>
+                        <div class="stat-label">上传中</div>
+                        <div class="stat-num stat-num-up" id="stat-uploading">0</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon stat-icon-down">
+                        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                    </div>
+                    <div>
+                        <div class="stat-label">下载中</div>
+                        <div class="stat-num stat-num-down" id="stat-downloading">0</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon stat-icon-error">
+                        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 2C6.47 2 2 6.47 2 12s4.47 10 10 10 10-4.47 10-10S17.53 2 12 2zm5 13.59L15.59 17 12 13.41 8.41 17 7 15.59 10.59 12 7 8.41 8.41 7 12 10.59 15.59 7 17 8.41 13.41 12 17 15.59z"/></svg>
+                    </div>
+                    <div>
+                        <div class="stat-label">错误</div>
+                        <div class="stat-num stat-num-error" id="stat-errors">0</div>
+                    </div>
+                </div>
+            </div>
+            <div class="content-area">
+                <div id="sync-cards"></div>
+            </div>
+        </div>
+
+        <!-- Settings View -->
+        <div id="view-settings" class="view">
+            <div class="page-topbar">
+                <h1 class="page-title">全局设置</h1>
+            </div>
+            <div class="content-area">
+                <!-- 云连接 section -->
+                <section class="settings-section">
+                    <div class="settings-section-header">
+                        <div>
+                            <h2 class="settings-section-title">云连接</h2>
+                            <p class="settings-section-desc">管理你的网盘连接，支持百度网盘和 115 网盘。</p>
+                        </div>
+                        <button class="btn-add" onclick="app.openAddConnectionDialog()">
+                            <span style="font-size:18px;font-weight:300;line-height:1;margin-right:2px">+</span>
+                            添加连接
+                        </button>
+                    </div>
+                    <div id="settings-connections-list" class="connection-cards">
+                        <div class="empty-state">加载中...</div>
+                    </div>
+                </section>
+
+                <!-- 同步设置 section -->
+                <section class="settings-section">
+                    <div class="settings-section-header">
+                        <div>
+                            <h2 class="settings-section-title">同步设置</h2>
+                            <p class="settings-section-desc">下载目录、并发数等同步相关参数。</p>
+                        </div>
+                    </div>
+                    <div class="settings-grid">
+                        <div class="settings-card" onclick="app.switchView('tasks')">
+                            <div class="settings-card-icon">
+                                <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
+                            </div>
+                            <div class="settings-card-body">
+                                <div class="settings-card-title">任务管理</div>
+                                <div class="settings-card-desc">查看、编辑、删除同步任务，配置计划、过滤与并发</div>
+                            </div>
+                            <div class="settings-card-arrow">›</div>
+                        </div>
+                        <div class="settings-card" onclick="app.switchView('logs')">
+                            <div class="settings-card-icon">
+                                <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 16H5v-2h7v2zm0-4H5v-2h7v2zm0-4H5V9h7v2zm7 8h-5V9h5v10zM17 7H5V5h12v2z"/></svg>
+                            </div>
+                            <div class="settings-card-body">
+                                <div class="settings-card-title">活动日志</div>
+                                <div class="settings-card-desc">查看同步任务的上传、下载、错误日志</div>
+                            </div>
+                            <div class="settings-card-arrow">›</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- 系统信息 -->
+                <section class="settings-section">
+                    <div class="settings-section-header">
+                        <div>
+                            <h2 class="settings-section-title">系统信息</h2>
+                            <p class="settings-section-desc">当前服务运行状态与版本。</p>
+                        </div>
+                    </div>
+                    <div class="settings-info-grid" id="settings-system-info">
+                        <div class="settings-info-row"><span class="settings-info-label">版本</span><span id="settings-info-version">—</span></div>
+                        <div class="settings-info-row"><span class="settings-info-label">数据目录</span><span id="settings-info-data">—</span></div>
+                        <div class="settings-info-row"><span class="settings-info-label">下载目录</span><span id="settings-info-download">—</span></div>
+                        <div class="settings-info-row"><span class="settings-info-label">同步目录</span><span id="settings-info-sync">—</span></div>
+                        <div class="settings-info-row"><span class="settings-info-label">活跃任务</span><span id="settings-info-active">—</span></div>
+                        <div class="settings-info-row"><span class="settings-info-label">活跃下载</span><span id="settings-info-downloads">—</span></div>
+                    </div>
+                    <div class="settings-grid" style="margin-top:12px;">
+                        <div class="settings-card" onclick="app.switchView('about')">
+                            <div class="settings-card-icon">
+                                <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>
+                            </div>
+                            <div class="settings-card-body">
+                                <div class="settings-card-title">关于</div>
+                                <div class="settings-card-desc">版本信息、技术栈与许可</div>
+                            </div>
+                            <div class="settings-card-arrow">›</div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </div>
+
+        <!-- About View -->
+        <div id="view-about" class="view">
+            <div class="page-topbar">
+                <h1 class="page-title">关于</h1>
+            </div>
+            <div class="content-area">
+                <div class="about-card">
+                    <div class="about-logo">
+                        <svg viewBox="0 0 24 24" width="48" height="48">
+                            <path fill="currentColor" d="M19.35 10.04C18.67 6.59 15.64 4 12 4c-1.48 0-2.85.43-4.01 1.17l1.46 1.46C10.21 6.23 11.08 6 12 6c2.76 0 5 2.24 5 5v1h2c1.66 0 3 1.34 3 3 0 .84-.35 1.59-.91 2.14l1.42 1.42C23.04 17.64 23.5 16.37 23.5 15c0-2.76-2.24-5-5-5h-.15zM3 5.27l2.75 2.74C4.09 8.86 3 10.79 3 13c0 3.31 2.69 6 6 6h2v-2H9c-2.21 0-4-1.79-4-4 0-1.95 1.4-3.57 3.25-3.92L10.27 9H4c-.55 0-1 .45-1 1v8c0 .55.45 1 1 1h14c.55 0 1-.45 1-1v-1.27L21.73 24 23 22.73 4.27 4 3 5.27z"/>
+                        </svg>
+                    </div>
+                    <div class="about-name">BauduSync</div>
+                    <div class="about-version" id="about-version-text">v0.1.0</div>
+                    <p class="about-tagline">仿群晖 CloudSync 的 NAS 云同步服务</p>
+                    <p class="about-desc">为 NAS 提供双向文件同步、实时监控与下载管理能力。</p>
+
+                    <div class="about-meta">
+                        <div class="about-meta-row"><span>技术栈</span><span>FastAPI · SQLite · 原生 HTML/CSS/JS</span></div>
+                        <div class="about-meta-row"><span>支持云盘</span><span>百度网盘、115 网盘</span></div>
+                        <div class="about-meta-row"><span>运行平台</span><span>Docker (x86_64 / arm64)</span></div>
+                        <div class="about-meta-row"><span>许可</span><span>MIT License</span></div>
+                    </div>
+
+                    <div class="about-footer">
+                        <div>Made with care for self-hosted power users.</div>
+                        <div style="margin-top:8px;font-size:12px;opacity:0.6">© 2026 BauduSync Contributors</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tasks View -->
+        <div id="view-tasks" class="view">
+            <div class="page-topbar">
+                <h1 class="page-title">任务管理</h1>
+                <div class="topbar-actions">
+                    <button class="btn-add" onclick="app.openCreateTaskDialog()">
+                        <span style="font-size:18px;font-weight:300;line-height:1;margin-right:2px">+</span>
+                        创建任务
+                    </button>
+                </div>
+            </div>
+            <div class="content-area">
+                <div id="tasks-list" class="task-list">
+                    <div class="empty-state">暂无任务</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Cloud Files View -->
+        <div id="view-cloud-files" class="view">
+            <div class="page-topbar">
+                <h1 class="page-title">网盘文件</h1>
+                <div class="topbar-actions">
+                    <button class="btn-refresh" title="刷新" onclick="app.loadCloudFiles()">
+                        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                    </button>
+                </div>
+            </div>
+            <div id="cloud-files-tabs" class="conn-tabs"></div>
+            <div class="content-area">
+                <div id="cloud-files-area">
+                    <div class="empty-state">加载中...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Downloads View -->
+        <div id="view-downloads" class="view">
+            <div class="page-topbar">
+                <h1 class="page-title">下载任务</h1>
+                <div class="topbar-actions">
+                    <button class="btn-refresh" title="刷新" onclick="app.loadDownloads()">
+                        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                    </button>
+                </div>
+            </div>
+            <div class="content-area">
+                <div id="downloads-list">
+                    <div class="empty-state">暂无下载任务</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Logs View -->
+        <div id="view-logs" class="view">
+            <div class="page-topbar">
+                <h1 class="page-title">日志</h1>
+                <div class="topbar-actions">
+                    <button class="btn-refresh" title="刷新" onclick="app.loadLogs()">
+                        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                    </button>
+                    <button class="btn-clear-logs" title="清除所有日志" onclick="app.clearAllLogs()">
+                        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                        <span>清除日志</span>
+                    </button>
+                </div>
+            </div>
+            <div class="content-area">
+                <div id="logs-container" class="logs-container">
+                    <div class="empty-state">加载中...</div>
+                </div>
+            </div>
+        </div>
+    </main>
+</div>
+
+<!-- Modal: Add Connection -->
+<div id="modal-connection" class="modal" style="display:none;">
+    <div class="modal-overlay" onclick="app.closeModal('modal-connection')"></div>
+    <div class="modal-content modal-lg">
+        <div class="modal-header">
+            <h2>添加云连接</h2>
+            <button class="modal-close" onclick="app.closeModal('modal-connection')">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="conn-type-selector">
+                <div class="conn-type-card" onclick="app.selectConnType('baidu')">
+                    <div class="conn-type-icon">📦</div>
+                    <div class="conn-type-name">百度网盘</div>
+                    <div class="conn-type-desc">通过 OAuth 授权或 Token 连接</div>
+                </div>
+                <div class="conn-type-card" onclick="app.selectConnType('115')">
+                    <div class="conn-type-icon">💾</div>
+                    <div class="conn-type-name">115 网盘</div>
+                    <div class="conn-type-desc">扫码登录或 Cookie 连接</div>
+                </div>
+            </div>
+
+            <!-- Baidu Connection Form -->
+            <div id="conn-form-baidu" class="conn-form" style="display:none;">
+                <h3>百度网盘连接</h3>
+                <div class="form-group">
+                    <label>连接名称</label>
+                    <input type="text" id="baidu-conn-name" class="input" placeholder="我的百度网盘">
+                </div>
+
+                <div id="baidu-oauth-section">
+                    <div id="baidu-oauth-status" class="baidu-oauth-status" style="display:none;"></div>
+                    <div style="background:var(--accent-light);border:1px solid rgba(79,110,247,0.2);border-radius:var(--radius-md);padding:16px;margin-bottom:12px;">
+                        <div style="font-weight:600;margin-bottom:8px;color:var(--text-primary);">步骤 1：获取授权码</div>
+                        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;line-height:1.6;">
+                            点击下方按钮，在百度登录并授权后，页面会显示一串授权码（code），请复制它。
+                        </p>
+                        <button id="baidu-login-btn" class="btn btn-primary baidu-login-btn" onclick="app.baiduGetAuthCode()">
+                            <svg viewBox="0 0 24 24" width="20" height="20" style="vertical-align:middle;margin-right:8px"><path fill="currentColor" d="M19.35 10.04C18.67 6.59 15.64 4 12 4c-1.48 0-2.85.43-4.01 1.17l1.46 1.46C10.21 6.23 11.08 6 12 6c2.76 0 5 2.24 5 5v1h2c1.66 0 3 1.34 3 3 0 .84-.35 1.59-.91 2.14l1.42 1.42C23.04 17.64 23.5 16.37 23.5 15c0-2.76-2.24-5-5-5h-.15zM3 5.27l2.75 2.74C4.09 8.86 3 10.79 3 13c0 3.31 2.69 6 6 6h2v-2H9c-2.21 0-4-1.79-4-4 0-1.95 1.4-3.57 3.25-3.92L10.27 9H4c-.55 0-1 .45-1 1v8c0 .55.45 1 1 1h14c.55 0 1-.45 1-1v-1.27L21.73 24 23 22.73 4.27 4 3 5.27z"/></svg>
+                            打开百度授权页面
+                        </button>
+                    </div>
+                    <div style="background:var(--accent-light);border:1px solid rgba(79,110,247,0.2);border-radius:var(--radius-md);padding:16px;">
+                        <div style="font-weight:600;margin-bottom:8px;color:var(--text-primary);">步骤 2：粘贴授权码</div>
+                        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;line-height:1.6;">
+                            将上一步获取的授权码粘贴到下方输入框，点击"连接"完成绑定。
+                        </p>
+                        <div class="form-group" style="margin-bottom:8px;">
+                            <input type="text" id="baidu-auth-code-input" class="input" placeholder="在此粘贴授权码" style="font-family:monospace;font-size:13px;">
+                        </div>
+                        <button class="btn btn-primary" onclick="app.baiduConnectWithCode()">连接</button>
+                    </div>
+                </div>
+
+                <div class="form-divider"><span>高级设置</span></div>
+                <details id="baidu-app-config-section" style="margin-bottom:12px;">
+                    <summary style="cursor:pointer;font-size:13px;color:var(--text-secondary);padding:4px 0;">
+                        自定义应用配置（可选，默认使用内置应用）
+                    </summary>
+                    <div style="padding:12px 0 0 0;">
+                        <div id="baidu-app-config-status" style="margin-bottom:8px;font-size:13px;"></div>
+                        <div class="form-group">
+                            <label>App Key</label>
+                            <input type="text" id="baidu-app-key" class="input" placeholder="百度开放平台 App Key">
+                        </div>
+                        <div class="form-group">
+                            <label>App Secret</label>
+                            <input type="password" id="baidu-app-secret" class="input" placeholder="百度开放平台 App Secret">
+                        </div>
+                        <button class="btn btn-secondary btn-sm" onclick="app.saveBaiduAppConfig()">保存应用配置</button>
+                        <p style="margin-top:8px;font-size:12px;color:var(--text-secondary);line-height:1.6">
+                            默认使用内置应用凭据，无需配置。如需使用自己的应用，前往
+                            <a href="https://pan.baidu.com/union/main/applist" target="_blank" style="color:var(--accent)">百度网盘开放平台</a>
+                            创建应用并填入 App Key 和 Secret。
+                        </p>
+                    </div>
+                </details>
+
+                <details id="baidu-token-section" style="margin-bottom:12px;">
+                    <summary style="cursor:pointer;font-size:13px;color:var(--text-secondary);padding:4px 0;">
+                        手动输入 Access Token（备用方式）
+                    </summary>
+                    <div style="padding:12px 0 0 0;">
+                        <div class="form-group">
+                            <label>Access Token</label>
+                            <input type="text" id="baidu-access-token" class="input" placeholder="Access Token">
+                        </div>
+                        <div class="form-group">
+                            <label>Refresh Token (可选)</label>
+                            <input type="text" id="baidu-refresh-token" class="input" placeholder="Refresh Token">
+                        </div>
+                        <button class="btn btn-secondary btn-sm" onclick="app.createBaiduTokenConn()">使用 Token 连接</button>
+                    </div>
+                </details>
+            </div>
+
+            <!-- 115 Connection Form -->
+            <div id="conn-form-115" class="conn-form" style="display:none;">
+                <h3>115 网盘连接</h3>
+                <div class="form-group">
+                    <label>连接名称</label>
+                    <input type="text" id="115-conn-name" class="input" placeholder="我的115网盘">
+                </div>
+                <div id="115-qr-section">
+                    <h4>方式一：扫码登录</h4>
+                    <div class="qr-container">
+                        <div id="115-qr-image" class="qr-image-area">
+                            <button class="btn btn-secondary" onclick="app.start115QRLogin()">获取二维码</button>
+                        </div>
+                        <div id="115-qr-status" class="qr-status"></div>
+                    </div>
+                </div>
+                <div class="form-divider"><span>或</span></div>
+                <h4>方式二：直接输入 Cookie</h4>
+                <div class="form-group">
+                    <label>UID</label>
+                    <input type="text" id="115-cookie-uid" class="input" placeholder="UID">
+                </div>
+                <div class="form-group">
+                    <label>CID</label>
+                    <input type="text" id="115-cookie-cid" class="input" placeholder="CID">
+                </div>
+                <div class="form-group">
+                    <label>SEID</label>
+                    <input type="text" id="115-cookie-seid" class="input" placeholder="SEID">
+                </div>
+                <button class="btn btn-primary" onclick="app.create115CookieConn()">连接</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal: Create/Edit Task -->
+<div id="modal-task" class="modal" style="display:none;">
+    <div class="modal-overlay" onclick="app.closeModal('modal-task')"></div>
+    <div class="modal-content modal-lg">
+        <div class="modal-header">
+            <h2 id="task-modal-title">创建同步任务</h2>
+            <button class="modal-close" onclick="app.closeModal('modal-task')">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label>任务名称</label>
+                <input type="text" id="task-name" class="input" placeholder="我的同步任务">
+            </div>
+            <div class="form-group">
+                <label>云连接</label>
+                <select id="task-connection" class="select"></select>
+            </div>
+            <div class="form-row">
+                <div class="form-group flex-1">
+                    <label>本地目录</label>
+                    <div class="dir-browser">
+                        <input type="text" id="task-local-path" class="input" placeholder="/photos" readonly>
+                        <button class="btn btn-secondary btn-sm" onclick="app.browseLocalDir()">浏览</button>
+                    </div>
+                </div>
+                <div class="form-group flex-1">
+                    <label>远程目录</label>
+                    <div class="dir-browser">
+                        <input type="text" id="task-remote-path" class="input" placeholder="/" readonly>
+                        <button class="btn btn-secondary btn-sm" onclick="app.browseRemoteDir()">浏览</button>
+                    </div>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>同步方向</label>
+                <div class="radio-group">
+                    <label class="radio-label">
+                        <input type="radio" name="sync-mode" value="bidirectional" checked>
+                        <span>双向同步</span>
+                        <small>本地和云端双向同步文件</small>
+                    </label>
+                    <label class="radio-label">
+                        <input type="radio" name="sync-mode" value="upload_only">
+                        <span>仅上传</span>
+                        <small>仅将本地文件同步到云端</small>
+                    </label>
+                    <label class="radio-label">
+                        <input type="radio" name="sync-mode" value="download_only">
+                        <span>仅下载</span>
+                        <small>仅将云端文件同步到本地</small>
+                    </label>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>同步计划</label>
+                <div class="radio-group">
+                    <label class="radio-label">
+                        <input type="radio" name="schedule-type" value="realtime">
+                        <span>实时同步</span>
+                        <small>检测到文件变化立即同步</small>
+                    </label>
+                    <label class="radio-label">
+                        <input type="radio" name="schedule-type" value="scheduled" checked>
+                        <span>定时同步</span>
+                        <small>按固定间隔自动同步</small>
+                    </label>
+                    <label class="radio-label">
+                        <input type="radio" name="schedule-type" value="manual">
+                        <span>手动同步</span>
+                        <small>仅手动触发同步</small>
+                    </label>
+                </div>
+            </div>
+            <div class="form-group" id="schedule-interval-group">
+                <label>同步间隔（分钟）</label>
+                <input type="number" id="task-interval" class="input" value="30" min="1">
+            </div>
+            <div class="form-row">
+                <div class="form-group flex-1">
+                    <label>包含文件（逗号分隔，如 *.jpg,*.png）</label>
+                    <input type="text" id="task-include" class="input" placeholder="*.*">
+                </div>
+                <div class="form-group flex-1">
+                    <label>排除文件（逗号分隔）</label>
+                    <input type="text" id="task-exclude" class="input" placeholder="*.tmp,*.bak">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>最大文件大小 (MB, 0=不限制)</label>
+                <input type="number" id="task-max-size" class="input" value="0" min="0">
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="app.closeModal('modal-task')">取消</button>
+            <button class="btn btn-primary" onclick="app.saveTask()">保存</button>
+        </div>
+    </div>
+</div>
+
+<!-- Modal: Directory Browser -->
+<div id="modal-browser" class="modal" style="display:none;">
+    <div class="modal-overlay" onclick="app.closeModal('modal-browser')"></div>
+    <div class="modal-content">
+        <div class="modal-header">
+            <h2 id="browser-title">浏览目录</h2>
+            <button class="modal-close" onclick="app.closeModal('modal-browser')">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div id="browser-root-switcher" class="browser-root-switcher" style="display:none;">
+                <button class="btn btn-sm btn-primary" id="browser-root-sync" onclick="app.switchBrowserRoot('sync')">同步目录 /sync</button>
+                <button class="btn btn-sm btn-secondary" id="browser-root-downloads" onclick="app.switchBrowserRoot('downloads')">下载目录 /downloads</button>
+            </div>
+            <div class="browser-toolbar">
+                <button class="btn btn-secondary btn-sm" id="browser-back-btn" onclick="app.browserGoUp()" style="display:none;">
+                    <svg viewBox="0 0 24 24" width="14" height="14" style="vertical-align:middle;margin-right:4px"><path fill="currentColor" d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+                    返回上级
+                </button>
+            </div>
+            <div id="browser-current-path" class="browser-path"></div>
+            <div id="browser-list" class="browser-list"></div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="app.closeModal('modal-browser')">取消</button>
+            <button class="btn btn-primary" onclick="app.confirmBrowserSelection()">选择此目录</button>
+        </div>
+    </div>
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
