@@ -7,9 +7,11 @@ the UI can filter by direction/task, search by path, and page through them.
 import logging
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from app import database as db
+from app.api.tasks import _rel_from_record
+from app.services.sync_engine import SyncEngine
 
 router = APIRouter(prefix="/api/records", tags=["records"])
 
@@ -65,3 +67,61 @@ async def clear_records():
     await db.db_clear_records()
     logger.info("Sync records cleared by user")
     return {"status": "cleared"}
+
+
+@router.delete("/{record_id}")
+async def delete_record(record_id: int):
+    """Remove a single row from the transfer history.
+
+    History only — the file itself is untouched on both sides.
+    """
+    if not await db.db_delete_record(record_id):
+        raise HTTPException(404, "Record not found")
+    return {"status": "deleted", "record_id": record_id}
+
+
+@router.post("/retry-all")
+async def retry_all():
+    """Re-queue every failed and skipped record in one go.
+
+    Same per-file path as the single-row retry: clear the ignore flag and the
+    backoff entry, then start one sync per affected task (a running sync just
+    picks the files up in its current cycle). Rows are left in place until the
+    file actually goes through, at which point the success write removes them.
+    """
+    records = await db.db_list_retryable_records()
+    if not records:
+        return {"queued": 0, "tasks": [], "skipped_records": 0}
+
+    touched: dict[int, dict] = {}
+    resolved = 0
+    for rec in records:
+        task = touched.get(rec["task_id"])
+        if task is None:
+            task = await db.db_get_task(rec["task_id"])
+            if not task:
+                continue
+            touched[rec["task_id"]] = task
+        rel = _rel_from_record(task, rec)
+        if not rel:
+            # The task's roots changed and the path can no longer be worked
+            # out; leave the row alone rather than guessing.
+            continue
+        await db.db_remove_ignored(rec["task_id"], rel)
+        await db.db_clear_failure(rec["task_id"], rel)
+        resolved += 1
+
+    started = []
+    already_running = []
+    for task_id, task in touched.items():
+        if SyncEngine.is_running(task_id):
+            already_running.append(task.get("name") or f"#{task_id}")
+        else:
+            SyncEngine.spawn(task_id)
+            started.append(task.get("name") or f"#{task_id}")
+
+    logger.info("Retry-all: %d record(s) re-queued across %d task(s)",
+                resolved, len(touched))
+    return {"queued": resolved, "records": len(records),
+            "tasks": list(touched.keys()),
+            "started": started, "already_running": already_running}

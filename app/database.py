@@ -677,6 +677,31 @@ async def db_clear_records():
         await db.commit()
 
 
+async def db_delete_record(record_id: int) -> bool:
+    """Remove one row from the transfer history (user asked to)."""
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        cur = await db.execute("DELETE FROM sync_records WHERE id = ?",
+                               (record_id,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def db_list_retryable_records() -> list[dict]:
+    """Every failed / skipped row, oldest first, for the Retry-all button.
+
+    Deliberately unpaginated: a backlog the user wants to clear in one click
+    should not silently stop at some limit. Oldest first so the re-sync queue
+    matches the order things originally went wrong.
+    """
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """SELECT * FROM sync_records
+               WHERE status IN ('failed', 'skipped')
+               ORDER BY created_at ASC, id ASC""")
+        return [dict(r) for r in await cursor.fetchall()]
+
+
 # ---- Per-file failure memory (exponential backoff) ----
 
 # Seconds to wait before the next attempt, indexed by attempt count - 1. The

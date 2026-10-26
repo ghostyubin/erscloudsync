@@ -1032,6 +1032,52 @@ const App = {
         }
     },
 
+    // Remove one row from the history. Purely cosmetic: the file on either
+    // side is untouched, and a file that keeps failing will simply write a
+    // fresh failure row on its next cycle.
+    async deleteRecord(recordId, btn) {
+        if (btn) btn.disabled = true;
+        try {
+            await this.api('DELETE', `/api/records/${recordId}`);
+            const row = btn && btn.closest('.rec-item');
+            if (row) {
+                row.style.transition = 'opacity .18s, transform .18s';
+                row.style.opacity = '0';
+                row.style.transform = 'translateX(12px)';
+                setTimeout(() => row.remove(), 180);
+            }
+            this.toast('记录已删除', 'success');
+            // Keep the header counts honest without refetching everything.
+            setTimeout(() => this.loadRecords(true), 220);
+        } catch (e) {
+            if (btn) btn.disabled = false;
+            this.toast('删除失败: ' + e.message, 'error');
+        }
+    },
+
+    // One click to re-queue everything that went wrong, across all tasks.
+    // The server clears ignore flags + backoff per file and spawns one sync
+    // per affected task; rows stay until the files actually succeed.
+    async retryAllRecords(btn) {
+        if (btn) { btn.disabled = true; btn.textContent = '重试中'; }
+        try {
+            const res = await this.api('POST', '/api/records/retry-all');
+            if (!res || !res.queued) {
+                this.toast('没有需要重试的记录', 'info');
+            } else {
+                const where = res.already_running && res.already_running.length
+                    ? `并入正在运行的任务（${res.already_running.join('、')}）`
+                    : `已启动任务（${(res.started || []).join('、')}）`;
+                this.toast(`已重新排队 ${res.queued} 条记录，${where}`, 'success');
+            }
+            await this.loadRecords(true);
+        } catch (e) {
+            this.toast('重试全部失败: ' + e.message, 'error');
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = '重试全部'; }
+        }
+    },
+
     async _renderIgnoredList(taskId) {
         const group = document.getElementById('task-ignored-group');
         const list = document.getElementById('task-ignored-list');
@@ -1700,6 +1746,7 @@ const App = {
         const rightPath = localFirst ? r.target : r.source;
         const failed = r.status === 'failed';
         const skipped = r.status === 'skipped';
+        const statusCls = failed ? 'rec-failed' : (skipped ? 'rec-skipped' : 'rec-ok');
         const d = new Date((r.created_at || 0) * 1000);
         const pad = (n) => String(n).padStart(2, '0');
         const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
@@ -1707,7 +1754,7 @@ const App = {
         const size = r.file_size ? this.formatSize(r.file_size) : '';
 
         return `
-            <div class="rec-item${failed ? ' rec-failed' : (skipped ? ' rec-skipped' : '')}" onclick="this.classList.toggle('expanded')">
+            <div class="rec-item ${statusCls}" onclick="this.classList.toggle('expanded')">
                 <div class="rec-icon rec-icon-${cls}">${this._recordIcon(cls)}</div>
                 <div class="rec-main">
                     <div class="rec-line1">
@@ -1734,8 +1781,14 @@ const App = {
                         ${skipped ? `<span class="rec-skip" title="${this.escape(r.error || '')}">已跳过</span>` : ''}
                     </div>
                 </div>
-                ${failed || skipped ? `<button class="rec-retry" title="清除失败/跳过状态并立即重试"
-                    onclick="event.stopPropagation(); app.retryRecord(${r.task_id}, ${r.id}, this)">重试</button>` : ''}
+                <div class="rec-actions">
+                    ${failed || skipped ? `<button class="rec-retry" title="清除失败/跳过状态并立即重试"
+                        onclick="event.stopPropagation(); app.retryRecord(${r.task_id}, ${r.id}, this)">重试</button>` : ''}
+                    <button class="rec-del" title="删除这条记录（只删历史，不动文件）"
+                        onclick="event.stopPropagation(); app.deleteRecord(${r.id}, this)">
+                        <svg viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                    </button>
+                </div>
             </div>`;
     },
 
@@ -1753,6 +1806,17 @@ const App = {
             if (stats.failed) parts.push(`其中失败 ${stats.failed}`);
             if (stats.skipped) parts.push(`已跳过 ${stats.skipped}`);
             summary.textContent = parts.join(' · ');
+        }
+
+        // "Retry all" only makes sense when there is something to retry; keep
+        // it visible but disabled otherwise so the toolbar layout is stable.
+        const retryAllBtn = document.getElementById('records-retry-all');
+        if (retryAllBtn) {
+            const n = (stats.failed || 0) + (stats.skipped || 0);
+            retryAllBtn.disabled = n === 0;
+            retryAllBtn.title = n
+                ? `重试全部失败/跳过的 ${n} 条记录`
+                : '没有失败或跳过的记录';
         }
 
         const taskSel = document.getElementById('records-task');
