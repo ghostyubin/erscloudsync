@@ -8,7 +8,12 @@
 #
 # 用法：
 #   cp resolv.conf.example resolv.conf
-#   # 然后在 compose 里启用：- ./resolv.conf:/etc/resolv.conf:ro
+#   # 然后在 compose 里启用：- /abs/path/to/resolv.conf:/etc/resolv.conf:ro
+#
+# ⚠️ 挂载源要写**宿主机绝对路径**。如果你的 compose 是由 Dockge / Portainer
+#    这类容器化面板执行的，写 ./resolv.conf 会被解析成面板容器内的
+#    /opt/stacks/... （宿主机上不存在 → Docker 自动建同名空目录 → 挂载失败报
+#    "not a directory"）。宿主机手动跑 compose 则相对路径没事，别被这个差异骗了。
 #
 # 注意：compose 的 dns: 参数在本场景下无效，它只配置内嵌解析器的上游。
 

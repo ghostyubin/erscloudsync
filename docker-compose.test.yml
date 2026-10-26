@@ -25,7 +25,9 @@ services:
       # 仅在「容器内域名解析全线失败」时启用（宿主机 dockerd 以 iptables='0' 运行，
       # 内嵌 DNS 127.0.0.11 起不来，典型是 OpenWrt)。详见 README「排错」。
       #   cp resolv.conf.example resolv.conf  →  取消下面这行的注释
-      # - ./resolv.conf:/etc/resolv.conf:ro
+      # ⚠️ 用 Dockge / Portainer 管理时，这里必须换成宿主机绝对路径，
+      #    写 ./resolv.conf 会被解析成面板容器内的 /opt/stacks/... 然后挂载失败。
+      # - /abs/path/to/resolv.conf:/etc/resolv.conf:ro
     environment:
       # 镜像跑在 UTC，不设这一行所有时间会差 8 小时
       - TZ=Asia/Shanghai

@@ -191,7 +191,8 @@ level=error msg="Resolver Start failed for container ..., \"setting up IP table 
 
    ```yaml
    volumes:
-     - ./resolv.conf:/etc/resolv.conf:ro
+     # 必须写宿主机绝对路径，原因见下面的「相对路径陷阱」
+     - /path/to/stack/resolv.conf:/etc/resolv.conf:ro
    ```
 
    `resolv.conf` 内容：
@@ -201,6 +202,41 @@ level=error msg="Resolver Start failed for container ..., \"setting up IP table 
    nameserver 119.29.29.29
    options timeout:2 attempts:2
    ```
+
+#### 相对路径陷阱：`./resolv.conf` 在 Dockge / Portainer 下会炸
+
+如果你是用 **Dockge / Portainer 这类容器化的面板**管理 compose，绑定挂载**必须写宿主机
+绝对路径**，不能写 `./resolv.conf`。
+
+原因是面板自己在容器里跑 `docker compose`：Dockge 把宿主机的 `.../dockge/stacks` 挂成
+容器内的 `/opt/stacks`，执行时工作目录是 `/opt/stacks/<栈名>`，于是 `./resolv.conf` 被解析成
+`/opt/stacks/<栈名>/resolv.conf`。这个路径在**宿主机上不存在**，Docker 会贴心地**自动建成
+一个同名空目录**，然后挂载时才发现类型不对：
+
+```
+error mounting "/opt/stacks/<栈名>/resolv.conf" to rootfs at "/etc/resolv.conf":
+  flags: 0x5000: not a directory: ... Are you trying to mount a directory onto a file?
+```
+
+坑在于：**从宿主机手动 `cd` 到栈目录跑 `compose up -d` 是好的**（相对路径解析正确），
+只有在面板里点「更新/重启」才会炸，所以很容易误判成"面板有 bug"。
+
+修复两步：
+
+```bash
+# 1. compose 里改成绝对路径
+sed -i 's|\./resolv\.conf:|/mnt/.../stacks/<栈名>/resolv.conf:|' compose.yaml
+
+# 2. 删掉 Docker 误建的空目录（否则它会一直挡着）
+rmdir /opt/stacks/<栈名>/resolv.conf /opt/stacks/<栈名> /opt/stacks
+```
+
+验证方式（在面板容器内部解析，这才是面板的真实视角）：
+
+```bash
+docker exec dockge-dockge-1 sh -c 'cd /opt/stacks/<栈名> && docker compose config' | grep -A1 resolv
+# source 应该是宿主机绝对路径
+```
 
 2. 让 dockerd 重新接管 iptables（清掉 `iptables='0'`），然后重启 dockerd。
    副作用是 OpenWrt 上的防火墙规则会多出 Docker 的链，视路由器策略而定。
