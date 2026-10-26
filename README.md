@@ -154,6 +154,71 @@ docker compose -f docker-compose.test.yml pull && docker compose -f docker-compo
 | 仅上传 | 只将本地文件上传到云端 |
 | 仅下载 | 只将云端文件下载到本地 |
 
+## 排错
+
+### 容器内所有域名解析失败（`Temporary failure in name resolution`）
+
+表现：添加百度授权时报
+`❌ Code exchange failed: Cannot connect to host openapi.baidu.com:443 ssl:default [Temporary failure in name resolution]`，
+但宿主机上网、容器内直接 `ping 223.5.5.5` 都正常。
+
+原因不在网络，而在 Docker 的内嵌 DNS。用户自定义网络（compose 默认建的
+`<项目名>_default`）里，每个容器的 `127.0.0.11` 由 dockerd 在容器 netns 内插一条
+DNAT 规则来支撑：
+
+```
+-t nat -I DOCKER_OUTPUT -d 127.0.0.11 -p udp --dport 53 -j DNAT --to-destination 127.0.0.11:<port>
+```
+
+如果宿主机 dockerd 是以 `iptables='0'` 运行的（OpenWrt 的 UCI 配置
+`dockerd.globals.iptables='0'`，或 `daemon.json` 里关了 iptables），这条规则插不进去，
+dockerd 日志会出现：
+
+```
+level=error msg="Resolver Start failed for container ..., \"setting up IP table rules failed: ...\""
+```
+
+内嵌解析器根本没起来，容器里任何域名查询都返回 `[Errno -3]`。此时
+**只有默认 `bridge` 网络能用**，自定义网络全军覆没。
+
+注意 `docker run --dns` / compose 的 `services.*.dns:` **解决不了**——它只是给那个
+（已经死掉的）内嵌解析器配置上游地址。
+
+可行的修法（选一）：
+
+1. **挂载自定义 resolv.conf（改动最小，推荐）**。文件被挂载后 Docker 不再自动生成它，
+   查询直接发给列出的 DNS，绕过坏掉的内嵌解析器：
+
+   ```yaml
+   volumes:
+     - ./resolv.conf:/etc/resolv.conf:ro
+   ```
+
+   `resolv.conf` 内容：
+
+   ```
+   nameserver 223.5.5.5
+   nameserver 119.29.29.29
+   options timeout:2 attempts:2
+   ```
+
+2. 让 dockerd 重新接管 iptables（清掉 `iptables='0'`），然后重启 dockerd。
+   副作用是 OpenWrt 上的防火墙规则会多出 Docker 的链，视路由器策略而定。
+
+验证方式：
+
+```bash
+docker exec baudusync python -c "import socket;print(socket.gethostbyname('openapi.baidu.com'))"
+docker exec baudusync python -c "import urllib.request;print(urllib.request.urlopen('https://openapi.baidu.com/oauth/2.0/token',timeout=10).status)"
+```
+
+### compose 里写了空的 `BAIDU_APP_KEY=` 导致授权失败
+
+compose 的 `environment` 若写成 `- BAIDU_APP_KEY=`（值为空），变量会被设成空字符串，
+从而**覆盖**内置的 ES 文件管理器凭据，授权请求会带着空 `client_id` 发出去。
+代码里已按「空值视为未配置」处理（`os.environ.get(k) or DEFAULT`），
+但更稳妥的做法是**不要写这一行**。需要自定义凭据时才填非空值。
+
 ## 项目结构
 
 ```

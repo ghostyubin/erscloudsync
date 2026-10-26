@@ -1,0 +1,17 @@
+# BauduSync - 自定义 DNS 配置样例
+#
+# 只有在「容器内所有域名解析失败」时才需要它：
+# 宿主机的 dockerd 以 iptables='0' 运行（常见于 OpenWrt），
+# 导致 Docker 内嵌 DNS（127.0.0.11）无法注入 nat 规则而启动失败，
+# 自定义网络里的容器查不到任何域名。挂载本文件覆盖 /etc/resolv.conf
+# 可绕过坏掉的内嵌解析器。详见 README「排错」章节。
+#
+# 用法：
+#   cp resolv.conf.example resolv.conf
+#   # 然后在 compose 里启用：- ./resolv.conf:/etc/resolv.conf:ro
+#
+# 注意：compose 的 dns: 参数在本场景下无效，它只配置内嵌解析器的上游。
+
+nameserver 223.5.5.5
+nameserver 119.29.29.29
+options timeout:2 attempts:2
