@@ -2138,12 +2138,31 @@ details[open] summary::before { transform: rotate(90deg); }
   .stat-label { font-size: 11px; margin-bottom: 0; }
   .stat-num { font-size: 18px; }
 
-  /* --- Sync card --- */
+  /* --- Sync card ---
+     The header must stay on ONE row: the task name plus three badges plus four
+     icon buttons do not fit in 336px of content width, so on phones the status
+     dot and badge padding are trimmed and the name is the only element allowed
+     to shrink (ellipsis). If anything else could shrink the row would wrap. */
   .sync-card { border-radius: var(--radius-md); margin-bottom: 12px; }
-  .sync-card-hd { padding: 10px 12px; align-items: flex-start; }
-  .sync-card-hd-actions { margin-left: auto; }
-  .card-icon-btn { width: 32px; height: 32px; }
-  .sync-card-name { font-size: 13px; }
+  .sync-card-hd {
+    padding: 9px 10px;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+  .sync-card-hd-info {
+    flex-wrap: nowrap;
+    flex: 1 1 auto;
+    gap: 5px;
+    overflow: hidden;
+  }
+  /* The state badge already carries the state colour, so the plain dot is
+     redundant and only eats horizontal budget. */
+  .sync-card-hd .sync-status-dot { display: none; }
+  .sync-card-name { flex: 0 1 auto; min-width: 0; font-size: 13px; }
+  .sync-card-hd .badge { font-size: 10px; padding: 2px 6px; }
+  .sync-card-hd-actions { margin-left: auto; gap: 3px; }
+  .card-icon-btn { width: 28px; height: 28px; }
   .sync-card-body { padding: 10px 12px; gap: 8px; }
 
   /* Both paths stay on a single row; the longer one shrinks and ellipsises
