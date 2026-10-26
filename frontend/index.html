@@ -68,8 +68,9 @@
             <div class="page-topbar">
                 <h1 class="page-title">同步任务</h1>
                 <div class="topbar-actions">
-                    <button class="btn-refresh" title="刷新" onclick="app.loadDashboard()">
-                        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                    <button class="btn-records" title="同步记录" onclick="app.openRecords()">
+                        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+                        <span>同步记录</span>
                     </button>
                     <button class="btn-add" onclick="app.openCreateTaskDialog()">
                         <span style="font-size:18px;font-weight:300;line-height:1;margin-right:2px">+</span>
@@ -313,6 +314,43 @@
             </div>
         </div>
     </main>
+</div>
+
+<!-- Modal: Sync Records -->
+<div id="modal-records" class="modal" style="display:none;">
+    <div class="modal-overlay" onclick="app.closeModal('modal-records')"></div>
+    <div class="modal-content modal-records">
+        <div class="modal-header">
+            <div class="records-title">
+                <h2>同步记录</h2>
+                <span class="records-summary" id="records-summary"></span>
+            </div>
+            <button class="modal-close" onclick="app.closeModal('modal-records')">&times;</button>
+        </div>
+        <div class="records-toolbar">
+            <div class="records-search-wrap">
+                <svg class="records-search-icon" viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+                <input type="text" id="records-search" class="input records-search"
+                       placeholder="搜索文件名或路径" oninput="app.onRecordsSearch()">
+            </div>
+            <select class="select records-filter" id="records-filter" onchange="app.reloadRecords()">
+                <option value="">全部动作</option>
+                <option value="upload">上传</option>
+                <option value="download">下载</option>
+                <option value="delete">删除</option>
+            </select>
+            <select class="select records-filter" id="records-task" onchange="app.reloadRecords()">
+                <option value="">全部任务</option>
+            </select>
+            <button class="records-clear" title="清空同步记录" onclick="app.clearRecords()">
+                <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                <span>清空</span>
+            </button>
+        </div>
+        <div class="modal-body records-body" id="records-list">
+            <div class="empty-state">加载中...</div>
+        </div>
+    </div>
 </div>
 
 <!-- Modal: Add Connection -->

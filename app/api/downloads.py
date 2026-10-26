@@ -148,11 +148,14 @@ async def _execute_download(dl_id: int, conn: dict, remote_path: str,
 
     provider = get_provider(conn["type"], conn["credentials"],
                             conn_id=conn.get("id"))
+    conn_name = conn.get("name", "")
     try:
         if is_dir:
-            await _download_folder(dl_id, provider, remote_path, local_path)
+            await _download_folder(dl_id, provider, remote_path, local_path,
+                                   conn_name)
         else:
-            await _download_single(dl_id, provider, remote_path, local_path)
+            await _download_single(dl_id, provider, remote_path, local_path,
+                                   conn_name)
 
         if dl_id in _running:
             await db.db_update_download(
@@ -161,6 +164,11 @@ async def _execute_download(dl_id: int, conn: dict, remote_path: str,
             logger.info(f"Download {dl_id} completed")
     except Exception as e:
         logger.error(f"Download {dl_id} failed: {e}")
+        await db.db_add_record(
+            0, "download", task_name="下载任务", connection=conn_name,
+            file_name=os.path.basename(remote_path.rstrip("/")),
+            source=remote_path, target=local_path, status="failed",
+            error=str(e))
         if dl_id in _running:
             await db.db_update_download(
                 dl_id, status="failed", error_message=str(e), completed_at=time.time()
@@ -174,7 +182,8 @@ async def _execute_download(dl_id: int, conn: dict, remote_path: str,
         await provider.close()
 
 
-async def _download_single(dl_id: int, provider, remote_path: str, local_path: str):
+async def _download_single(dl_id: int, provider, remote_path: str,
+                           local_path: str, conn_name: str = ""):
     """Download a single file."""
     _progress[dl_id] = {
         "transferred": 0,
@@ -223,6 +232,10 @@ async def _download_single(dl_id: int, provider, remote_path: str, local_path: s
     _progress[dl_id]["processed_files"] = 1
     _progress[dl_id]["speed"] = 0
     traffic.add("download", total_size)
+    await db.db_add_record(
+        0, "download", task_name="下载任务", connection=conn_name,
+        file_name=os.path.basename(remote_path.rstrip("/")),
+        source=remote_path, target=local_path, file_size=total_size)
     await db.db_update_download(
         dl_id,
         downloaded_bytes=total_size,
@@ -230,7 +243,8 @@ async def _download_single(dl_id: int, provider, remote_path: str, local_path: s
     )
 
 
-async def _download_folder(dl_id: int, provider, remote_path: str, local_path: str):
+async def _download_folder(dl_id: int, provider, remote_path: str,
+                           local_path: str, conn_name: str = ""):
     """Recursively download a folder."""
     _progress[dl_id] = {
         "transferred": 0,
@@ -287,6 +301,9 @@ async def _download_folder(dl_id: int, provider, remote_path: str, local_path: s
         transferred += f.size
         processed += 1
         traffic.add("download", f.size)
+        await db.db_add_record(
+            0, "download", task_name="下载任务", connection=conn_name,
+            file_name=f.name, source=f.path, target=f_local, file_size=f.size)
         _progress[dl_id]["processed_files"] = processed
         _progress[dl_id]["transferred"] = transferred
 

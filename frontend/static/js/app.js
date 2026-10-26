@@ -1468,6 +1468,226 @@ const App = {
         }
     },
 
+    // ---- Sync records (per-file transfer history) ----
+    _records: [],
+    _recordsTotal: 0,
+    _recordsLoading: false,
+    _recordsQuery: '',
+    _recordsAction: '',
+    _recordsTask: '',
+    _recordsSearchTimer: null,
+
+    openRecords() {
+        this._records = [];
+        this._recordsTotal = 0;
+        this._recordsQuery = '';
+        this._recordsAction = '';
+        this._recordsTask = '';
+        ['records-search', 'records-filter', 'records-task'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.value = '';
+        });
+        this.openModal('modal-records');
+        this._bindRecordsScroll();
+        this.loadRecords(true);
+    },
+
+    // Bound once: openRecords() runs every time the panel is opened, and a
+    // listener added per open would fire the "load more" N times.
+    _bindRecordsScroll() {
+        const list = document.getElementById('records-list');
+        if (!list || list.dataset.scrollBound === '1') return;
+        list.dataset.scrollBound = '1';
+        list.addEventListener('scroll', () => {
+            if (this._recordsLoading) return;
+            if (this._records.length >= this._recordsTotal) return;
+            if (list.scrollTop + list.clientHeight >= list.scrollHeight - 240) {
+                this.loadRecords(false);
+            }
+        });
+    },
+
+    async loadRecords(reset) {
+        if (this._recordsLoading) return;
+        const list = document.getElementById('records-list');
+        this._recordsLoading = true;
+        if (reset) {
+            this._records = [];
+            this._recordsTotal = 0;
+            if (list) list.innerHTML = '<div class="empty-state">加载中...</div>';
+        }
+        try {
+            const params = new URLSearchParams({
+                limit: 60, offset: reset ? 0 : this._records.length
+            });
+            if (this._recordsAction) params.set('action', this._recordsAction);
+            if (this._recordsTask) params.set('task_id', this._recordsTask);
+            if (this._recordsQuery) params.set('q', this._recordsQuery);
+            const data = await this.api('GET', '/api/records?' + params.toString());
+            const rows = data.records || [];
+            this._records = reset ? rows : this._records.concat(rows);
+            this._recordsTotal = data.total || 0;
+            this.renderRecords(data);
+        } catch (e) {
+            if (list) {
+                list.innerHTML = `<div class="empty-state" style="color:var(--color-error)">${this.escape(e.message)}</div>`;
+            }
+        } finally {
+            this._recordsLoading = false;
+        }
+    },
+
+    reloadRecords() {
+        const filter = document.getElementById('records-filter');
+        const task = document.getElementById('records-task');
+        this._recordsAction = filter ? filter.value : '';
+        this._recordsTask = task ? task.value : '';
+        this.loadRecords(true);
+    },
+
+    onRecordsSearch() {
+        clearTimeout(this._recordsSearchTimer);
+        this._recordsSearchTimer = setTimeout(() => {
+            const el = document.getElementById('records-search');
+            this._recordsQuery = el ? el.value.trim() : '';
+            this.loadRecords(true);
+        }, 280);
+    },
+
+    async clearRecords() {
+        if (!confirm('确定清空同步记录？只删除这份历史清单，不会动本地或云端文件。')) return;
+        try {
+            await this.api('DELETE', '/api/records');
+            this.toast('同步记录已清空', 'success');
+            this.loadRecords(true);
+        } catch (e) {
+            this.toast('清空失败: ' + e.message, 'error');
+        }
+    },
+
+    _recordIcon(cls) {
+        const paths = {
+            up: 'M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z',
+            down: 'M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z',
+            del: 'M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z'
+        };
+        return `<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="${paths[cls]}"/></svg>`;
+    },
+
+    _dayLabel(ts) {
+        const d = new Date(ts * 1000);
+        const startOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+        const days = Math.round((startOf(new Date()) - startOf(d)) / 86400000);
+        if (days === 0) return '今天';
+        if (days === 1) return '昨天';
+        const md = `${d.getMonth() + 1}月${d.getDate()}日`;
+        return d.getFullYear() === new Date().getFullYear()
+            ? md : `${d.getFullYear()}年${md}`;
+    },
+
+    _renderRecordRow(r) {
+        const action = r.action || '';
+        const isDelete = action.indexOf('delete') === 0;
+        const cls = isDelete ? 'del' : (action === 'upload' ? 'up' : 'down');
+        const label = isDelete ? '删除' : (action === 'upload' ? '上传' : '下载');
+        // upload / delete_remote start on the local side; download /
+        // delete_local start on the cloud side.
+        const localFirst = action === 'upload' || action === 'delete_remote';
+        const cloud = this.escape(r.connection || '云端');
+        const leftSide = localFirst ? '本地' : cloud;
+        const rightSide = localFirst ? cloud : '本地';
+        const leftPath = localFirst ? r.source : r.target;
+        const rightPath = localFirst ? r.target : r.source;
+        const failed = r.status === 'failed';
+        const d = new Date((r.created_at || 0) * 1000);
+        const pad = (n) => String(n).padStart(2, '0');
+        const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+        const taskName = this.escape(r.task_name || `任务#${r.task_id}`);
+        const size = r.file_size ? this.formatSize(r.file_size) : '';
+
+        return `
+            <div class="rec-item${failed ? ' rec-failed' : ''}" onclick="this.classList.toggle('expanded')">
+                <div class="rec-icon rec-icon-${cls}">${this._recordIcon(cls)}</div>
+                <div class="rec-main">
+                    <div class="rec-line1">
+                        <span class="rec-name" title="${this.escape(r.file_name)}">${this.escape(r.file_name || '(未命名)')}</span>
+                        ${size ? `<span class="rec-size">${size}</span>` : ''}
+                    </div>
+                    <div class="rec-line2">
+                        <span class="rec-end">
+                            <span class="rec-side">${leftSide}</span>
+                            <span class="rec-path" title="${this.escape(leftPath)}">${this.escape(leftPath)}</span>
+                        </span>
+                        <span class="rec-arrow">→</span>
+                        <span class="rec-end">
+                            <span class="rec-side">${rightSide}</span>
+                            <span class="rec-path" title="${this.escape(rightPath)}">${this.escape(rightPath)}</span>
+                        </span>
+                    </div>
+                    <div class="rec-line3">
+                        <span class="rec-tag rec-tag-${cls}">${label}</span>
+                        <span>${time}</span>
+                        <span class="rec-sep">·</span>
+                        <span class="rec-task">${taskName}</span>
+                        ${failed ? `<span class="rec-fail" title="${this.escape(r.error || '')}">失败</span>` : ''}
+                    </div>
+                </div>
+            </div>`;
+    },
+
+    renderRecords(data) {
+        const list = document.getElementById('records-list');
+        if (!list) return;
+        const stats = data.stats || {};
+        const byAction = stats.by_action || {};
+        const summary = document.getElementById('records-summary');
+        if (summary) {
+            const parts = [`共 ${stats.total || 0} 条`];
+            if (byAction.upload) parts.push(`上传 ${byAction.upload}`);
+            if (byAction.download) parts.push(`下载 ${byAction.download}`);
+            if (byAction.delete) parts.push(`删除 ${byAction.delete}`);
+            if (stats.failed) parts.push(`其中失败 ${stats.failed}`);
+            summary.textContent = parts.join(' · ');
+        }
+
+        const taskSel = document.getElementById('records-task');
+        if (taskSel) {
+            const opts = ['<option value="">全部任务</option>'];
+            (stats.tasks || []).forEach(t => {
+                const name = this.escape(t.task_name || `任务#${t.task_id}`);
+                opts.push(`<option value="${t.task_id}">${name} (${t.n})</option>`);
+            });
+            taskSel.innerHTML = opts.join('');
+            taskSel.value = this._recordsTask;
+        }
+
+        if (this._records.length === 0) {
+            const filtered = this._recordsQuery || this._recordsAction || this._recordsTask;
+            list.innerHTML = `<div class="empty-state">${filtered ? '没有匹配的记录' : '暂无同步记录'}</div>`;
+            return;
+        }
+
+        const html = [];
+        let lastDay = '';
+        this._records.forEach(r => {
+            const day = this._dayLabel(r.created_at);
+            if (day !== lastDay) {
+                html.push(`<div class="rec-day">${this.escape(day)}</div>`);
+                lastDay = day;
+            }
+            html.push(this._renderRecordRow(r));
+        });
+
+        if (this._records.length < this._recordsTotal) {
+            html.push(`<button class="records-more" id="records-more"
+                onclick="app.loadRecords(false)">
+                加载更多（${this._records.length}/${this._recordsTotal}）</button>`);
+        } else if (this._recordsTotal > 20) {
+            html.push(`<div class="records-end">已显示全部 ${this._recordsTotal} 条</div>`);
+        }
+        list.innerHTML = html.join('');
+    },
+
     // ---- Progress Polling ----
     startProgressPolling() {
         if (this.progressTimer) clearTimeout(this.progressTimer);

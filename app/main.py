@@ -19,7 +19,7 @@ from app.config import WEB_HOST, WEB_PORT, FRONTEND_DIR, LOCAL_SYNC_ROOT, LOG_DI
 from app.database import init_db
 from app.services.scheduler import scheduler
 from app.version import APP_VERSION
-from app.api import connections, tasks, system, downloads, logs
+from app.api import connections, tasks, system, downloads, logs, records
 
 # Configure logging — console + rotating file in /config/log/
 logging.basicConfig(
@@ -112,6 +112,7 @@ app.include_router(tasks.router)
 app.include_router(system.router)
 app.include_router(downloads.router)
 app.include_router(logs.router)
+app.include_router(records.router)
 
 
 # Serve frontend

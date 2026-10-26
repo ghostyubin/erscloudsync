@@ -7,6 +7,7 @@ Supports three sync modes:
 """
 
 import asyncio
+import logging
 import os
 import fnmatch
 import time
@@ -108,6 +109,34 @@ class SyncProgress:
         if self.total_files <= 0:
             return 0
         return min(100, round(self.completed_files / self.total_files * 100))
+
+
+logger = logging.getLogger(__name__)
+
+
+async def _add_record(ctx: Optional[dict], action: str, source: str,
+                      target: str, file_size: int = 0,
+                      status: str = "success", error: str = "") -> None:
+    """Write one row to sync_records.
+
+    Deliberately best-effort: the history panel is a convenience, so a failed
+    insert (disk full, schema from an older image, ...) must never abort the
+    transfer that just succeeded.
+    """
+    try:
+        await db.db_add_record(
+            (ctx or {}).get("task_id", 0), action,
+            task_name=(ctx or {}).get("task_name", ""),
+            connection=(ctx or {}).get("connection", ""),
+            file_name=os.path.basename((target or source).rstrip("/")),
+            source=source or "",
+            target=target or "",
+            file_size=file_size,
+            status=status,
+            error=error,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not write sync record for %s", target, exc_info=True)
 
 
 class SyncEngine:
@@ -224,6 +253,14 @@ class SyncEngine:
             if not await provider.test_connection():
                 raise RuntimeError(f"Connection to {connection['name']} failed")
 
+            # Snapshot of the labels every sync_records row carries, so the
+            # history panel still reads correctly after the task is deleted.
+            record_ctx = {
+                "task_id": task_id,
+                "task_name": task["name"],
+                "connection": connection["name"],
+            }
+
             sync_mode = task["sync_mode"]
             local_base = cls._resolve_local_base(task["local_path"])
             remote_base = task["remote_path"]
@@ -296,7 +333,7 @@ class SyncEngine:
                 try:
                     result = await cls._execute_op(
                         op, provider, task_id, semaphore, progress,
-                        local_base, remote_base)
+                        local_base, remote_base, record_ctx)
                 except asyncio.CancelledError:
                     progress.skipped_files += 1
                     raise
@@ -537,7 +574,8 @@ class SyncEngine:
     async def _execute_op(cls, op: SyncOperation, provider: CloudProvider,
                           task_id: int, semaphore: asyncio.Semaphore,
                           progress: SyncProgress, local_base: str,
-                          remote_base: str) -> str:
+                          remote_base: str,
+                          record_ctx: Optional[dict] = None) -> str:
         """Execute a single sync operation.
 
         Returns "success" / "skipped" (or raises). Progress counters are bumped
@@ -616,6 +654,8 @@ class SyncEngine:
                         traffic.add("upload", file_size)
                         await db.db_add_log(task_id, "upload", op.remote_path,
                             f"Uploaded {op.local_path}")
+                        await _add_record(record_ctx, "upload", op.local_path,
+                                          op.remote_path, file_size)
                         # Record state right away: the maps used at the end of
                         # the cycle are pre-transfer snapshots, so a completed
                         # upload would otherwise stay unrecorded if the run is
@@ -674,6 +714,8 @@ class SyncEngine:
                         traffic.add("download", done_size)
                         await db.db_add_log(task_id, "download", op.remote_path,
                             f"Downloaded to {op.local_path}")
+                        await _add_record(record_ctx, "download", op.remote_path,
+                                          op.local_path, done_size)
                         # Same reasoning as the upload path: persist the state
                         # immediately and carry the remote md5 over, so the
                         # next cycle can tell "already downloaded" apart from
@@ -692,16 +734,26 @@ class SyncEngine:
                         progress.active_transfers.pop(transfer_id, None)
 
                 elif op.action == SyncAction.DELETE_LOCAL:
+                    size = 0
                     if os.path.exists(op.local_path):
+                        try:
+                            size = os.path.getsize(op.local_path)
+                        except OSError:
+                            size = 0
                         os.remove(op.local_path)
                     await db.db_add_log(task_id, "delete_local", op.local_path,
                         "Deleted locally (was deleted on remote)")
+                    await _add_record(record_ctx, "delete_local", op.remote_path,
+                                      op.local_path, size)
                     return "success"
 
                 elif op.action == SyncAction.DELETE_REMOTE:
                     await provider.delete_file(op.remote_path)
                     await db.db_add_log(task_id, "delete_remote", op.remote_path,
                         "Deleted on remote (was deleted locally)")
+                    await _add_record(record_ctx, "delete_remote", op.local_path,
+                                      op.remote_path,
+                                      op.file_info.size if op.file_info else 0)
                     return "success"
 
             except asyncio.CancelledError as e:
@@ -712,6 +764,14 @@ class SyncEngine:
             except Exception as e:
                 await db.db_add_log(task_id, "error", op.remote_path or op.local_path,
                     f"{op.action.value} failed: {e}")
+                if op.action in (SyncAction.UPLOAD, SyncAction.DOWNLOAD,
+                                 SyncAction.DELETE_LOCAL, SyncAction.DELETE_REMOTE):
+                    if op.action in (SyncAction.UPLOAD, SyncAction.DELETE_REMOTE):
+                        src, dst = op.local_path, op.remote_path
+                    else:
+                        src, dst = op.remote_path, op.local_path
+                    await _add_record(record_ctx, op.action.value, src, dst,
+                                      status="failed", error=str(e))
                 raise
 
             return "skipped"

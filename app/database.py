@@ -88,6 +88,37 @@ CREATE INDEX IF NOT EXISTS idx_sync_logs_task ON sync_logs(task_id);
 CREATE INDEX IF NOT EXISTS idx_sync_logs_time ON sync_logs(timestamp);
 CREATE INDEX IF NOT EXISTS idx_sync_history_task ON sync_history(task_id);
 
+-- One row per transferred/deleted file, written by the sync engine and by the
+-- download manager. sync_logs holds human-readable prose ("Uploaded /sync/x"),
+-- which is fine for a log view but cannot be filtered by direction, sorted, or
+-- joined against a task reliably — every consumer would have to re-parse the
+-- message text. This table stores the pieces separately: who (task + cloud
+-- connection), what (file name + size), from where, to where, and whether it
+-- worked.
+--
+-- No FOREIGN KEY on purpose: task_name / connection are snapshot strings, so
+-- deleting a task must not wipe its transfer history.
+CREATE TABLE IF NOT EXISTS sync_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL DEFAULT 0,
+    task_name TEXT NOT NULL DEFAULT '',
+    connection TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL
+        CHECK(action IN ('upload', 'download', 'delete_local', 'delete_remote')),
+    file_name TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    target TEXT NOT NULL DEFAULT '',
+    file_size INTEGER DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'success'
+        CHECK(status IN ('success', 'failed')),
+    error TEXT DEFAULT '',
+    created_at REAL DEFAULT (strftime('%s','now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_records_time ON sync_records(created_at);
+CREATE INDEX IF NOT EXISTS idx_sync_records_action ON sync_records(action);
+CREATE INDEX IF NOT EXISTS idx_sync_records_task ON sync_records(task_id);
+
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT '',
@@ -364,6 +395,136 @@ async def db_clear_all_logs():
 async def db_clear_task_logs(task_id: int):
     async with aiosqlite.connect(str(DB_PATH)) as db:
         await db.execute("DELETE FROM sync_logs WHERE task_id = ?", (task_id,))
+        await db.commit()
+
+
+# ---- Sync records (one row per file that moved) ----
+
+# Hard cap so the table cannot grow without bound on a NAS that syncs for
+# years. Trimming happens every _RECORD_TRIM_EVERY inserts instead of on every
+# write: a DELETE with a subquery per transferred file would double the cost of
+# the write path for no benefit.
+_RECORD_LIMIT = 20000
+_RECORD_TRIM_EVERY = 200
+_record_writes = 0
+
+
+async def db_add_record(task_id: int, action: str, *,
+                        task_name: str = "", connection: str = "",
+                        file_name: str = "", source: str = "", target: str = "",
+                        file_size: int = 0, status: str = "success",
+                        error: str = ""):
+    """Record a file that was uploaded, downloaded or deleted."""
+    global _record_writes
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        await db.execute(
+            """INSERT INTO sync_records
+               (task_id, task_name, connection, action, file_name,
+                source, target, file_size, status, error)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (task_id, task_name, connection, action, file_name,
+             source, target, int(file_size or 0), status, error or ""),
+        )
+        _record_writes += 1
+        if _record_writes % _RECORD_TRIM_EVERY == 0:
+            await db.execute(
+                """DELETE FROM sync_records WHERE id NOT IN
+                   (SELECT id FROM sync_records ORDER BY id DESC LIMIT ?)""",
+                (_RECORD_LIMIT,),
+            )
+        await db.commit()
+
+
+def _records_where(action: Optional[str] = None, task_id: Optional[int] = None,
+                   status: Optional[str] = None,
+                   query: Optional[str] = None) -> tuple[str, list]:
+    """Build the shared WHERE clause for the record list / count queries."""
+    where: list[str] = []
+    params: list = []
+    if action:
+        # "delete" is a UI-level grouping of the two delete actions.
+        if action == "delete":
+            where.append("action LIKE 'delete%'")
+        elif action in ("upload", "download", "delete_local", "delete_remote"):
+            where.append("action = ?")
+            params.append(action)
+    if task_id is not None:
+        where.append("task_id = ?")
+        params.append(task_id)
+    if status in ("success", "failed"):
+        where.append("status = ?")
+        params.append(status)
+    if query:
+        like = f"%{query}%"
+        where.append("(file_name LIKE ? OR source LIKE ? OR target LIKE ?)")
+        params.extend([like, like, like])
+    return ("WHERE " + " AND ".join(where)) if where else "", params
+
+
+async def db_list_records(limit: int = 50, offset: int = 0, *,
+                          action: Optional[str] = None,
+                          task_id: Optional[int] = None,
+                          status: Optional[str] = None,
+                          query: Optional[str] = None) -> list[dict]:
+    clause, params = _records_where(action, task_id, status, query)
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            f"""SELECT * FROM sync_records {clause}
+                ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?""",
+            [*params, limit, offset],
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def db_count_records(*, action: Optional[str] = None,
+                           task_id: Optional[int] = None,
+                           status: Optional[str] = None,
+                           query: Optional[str] = None) -> int:
+    clause, params = _records_where(action, task_id, status, query)
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        cursor = await db.execute(
+            f"SELECT COUNT(*) FROM sync_records {clause}", params)
+        row = await cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
+async def db_record_stats() -> dict:
+    """Totals for the panel header and the task filter dropdown."""
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """SELECT action, status, COUNT(*) AS n, COALESCE(SUM(file_size),0) AS b
+               FROM sync_records GROUP BY action, status""")
+        rows = [dict(r) for r in await cursor.fetchall()]
+        cursor = await db.execute(
+            """SELECT task_id, task_name, COUNT(*) AS n
+               FROM sync_records GROUP BY task_id, task_name
+               ORDER BY n DESC LIMIT 100""")
+        tasks = [dict(r) for r in await cursor.fetchall()]
+
+    by_action: dict[str, int] = {}
+    total = 0
+    failed = 0
+    total_bytes = 0
+    for r in rows:
+        total += r["n"]
+        total_bytes += r["b"]
+        if r["status"] == "failed":
+            failed += r["n"]
+        # by_action counts every row, failures included, so the per-direction
+        # numbers in the panel header add up to the total. "failed" is an extra
+        # dimension on top (a subset, not a fourth bucket).
+        key = "delete" if r["action"].startswith("delete") else r["action"]
+        by_action[key] = by_action.get(key, 0) + r["n"]
+    return {"total": total, "failed": failed, "bytes": total_bytes,
+            "by_action": by_action, "tasks": tasks}
+
+
+async def db_clear_records():
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        await db.execute("DELETE FROM sync_records")
         await db.commit()
 
 

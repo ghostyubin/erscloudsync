@@ -1513,6 +1513,313 @@ body {
   gap: 8px;
 }
 
+/* ============================================================
+   Sync records panel
+   ============================================================ */
+
+.btn-records {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 13px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.btn-records:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Fixed height, not max-height: the list scrolls inside, so filtering does not
+   make the panel jump around while the user types. */
+.modal-records {
+  width: 92%;
+  max-width: 760px;
+  height: 86vh;
+  max-height: 86vh;
+}
+
+.records-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.records-summary {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.records-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.records-search-wrap {
+  position: relative;
+  flex: 1 1 190px;
+  min-width: 140px;
+}
+
+.records-search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.records-search {
+  height: 34px;
+  padding: 4px 12px 4px 31px;
+  font-size: 13px;
+}
+
+.records-filter {
+  width: auto;
+  height: 34px;
+  padding: 4px 8px;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.records-clear {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 34px;
+  padding: 0 11px;
+  background: var(--surface);
+  color: var(--color-error);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.records-clear:hover {
+  background: var(--color-error);
+  border-color: var(--color-error);
+  color: #fff;
+}
+
+.records-body {
+  padding: 4px 12px 14px;
+}
+
+.rec-day {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--text-muted);
+  padding: 12px 6px 5px;
+  position: sticky;
+  top: -4px;
+  background: var(--surface);
+  z-index: 1;
+}
+
+.rec-item {
+  display: flex;
+  gap: 10px;
+  padding: 9px 8px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.rec-item:hover { background: var(--surface-2); }
+
+.rec-item.rec-failed { background: rgba(239, 68, 68, 0.06); }
+
+.rec-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.rec-icon-up   { background: rgba(249, 115, 22, 0.13); color: var(--color-warning); }
+.rec-icon-down { background: var(--accent-light); color: var(--accent); }
+.rec-icon-del  { background: rgba(239, 68, 68, 0.13); color: var(--color-error); }
+
+.rec-main { flex: 1; min-width: 0; }
+
+.rec-line1 {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.rec-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.rec-size {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* One line by default (the full path stays available via title / tap), so a
+   deep folder tree cannot blow every row up to three lines. */
+.rec-line2 {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.rec-item.expanded .rec-line2 {
+  flex-wrap: wrap;
+  white-space: normal;
+}
+
+/* One side of the "from -> to" pair. Kept as a wrapper so the phone breakpoint
+   can stack the two sides without splitting the side label from its path. */
+.rec-end {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.rec-side {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 15px;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rec-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+}
+
+.rec-item.expanded .rec-path {
+  white-space: normal;
+  word-break: break-all;
+  overflow: visible;
+}
+
+.rec-arrow { flex-shrink: 0; color: var(--text-muted); }
+
+.rec-line3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.rec-tag {
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.rec-tag-up   { color: var(--color-warning); background: rgba(249, 115, 22, 0.13); }
+.rec-tag-down { color: var(--accent); background: var(--accent-light); }
+.rec-tag-del  { color: var(--color-error); background: rgba(239, 68, 68, 0.13); }
+
+.rec-task {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.rec-sep { flex-shrink: 0; }
+
+.rec-fail {
+  color: var(--color-error);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.records-more {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  padding: 9px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.records-more:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.records-end {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 14px 0 4px;
+}
+
 /* Connection Type Selector */
 .conn-type-selector {
   display: flex;
@@ -2331,6 +2638,35 @@ details[open] summary::before { transform: rotate(90deg); }
   .log-action { width: auto; }
   .log-task { max-width: none; }
   .log-detail { flex-basis: 100%; }
+
+  /* --- Sync records ---
+     The trigger keeps only its icon (the topbar already holds 新建任务 next to
+     it), the search box takes a full row, and the two selects share the next
+     one with the clear button. */
+  .btn-records { padding: 0 10px; gap: 0; }
+  .btn-records span { display: none; }
+  .records-toolbar { padding: 10px 12px; gap: 6px; }
+  .records-search-wrap { flex: 1 1 100%; }
+  .records-search { font-size: 14px; }
+  .records-filter { flex: 1 1 auto; font-size: 13px; }
+  .records-clear { margin-left: 0; }
+  .records-body { padding: 2px 8px 12px; }
+  .rec-day { padding: 10px 4px 4px; }
+  .rec-item { padding: 8px 6px; gap: 8px; }
+  .rec-name { font-size: 12.5px; }
+  /* Two sides need a full line each: side by side on 390px leaves ~20
+     characters per path, which shows a directory prefix and nothing else. */
+  .rec-line2 {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 1px;
+    font-size: 10.5px;
+  }
+  .rec-item.expanded .rec-line2 { flex-wrap: nowrap; }
+  .rec-end { flex: 1 1 auto; gap: 4px; }
+  .rec-arrow { display: none; }
+  .rec-line2 .rec-path { font-size: 10px; }
+  .rec-side { font-size: 9.5px; max-width: 76px; }
 
   /* --- Settings / about --- */
   .settings-section { margin-bottom: 22px; }
