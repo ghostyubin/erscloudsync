@@ -4,10 +4,9 @@ import os
 import shutil
 from fastapi import APIRouter, HTTPException
 from app.config import LOCAL_SYNC_ROOT, LOCAL_ROOTS, DOWNLOAD_DIR, DATA_DIR
+from app.version import APP_VERSION
 
 router = APIRouter(prefix="/api/system", tags=["system"])
-
-APP_VERSION = "0.1.0"
 
 
 @router.get("/health")

@@ -173,6 +173,19 @@ body {
   border-top: 1px solid var(--border);
 }
 
+/* Build stamp (DEV_YYYYMMDDHHMM) — tells you which build is running */
+.sidebar-version {
+  margin-top: 8px;
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: center;
+  color: var(--text-muted);
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.3px;
+  user-select: text;
+}
+
 .storage-bar-area {
   margin-bottom: 4px;
 }

@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import WEB_HOST, WEB_PORT, FRONTEND_DIR, LOCAL_SYNC_ROOT, LOG_DIR
 from app.database import init_db
 from app.services.scheduler import scheduler
+from app.version import APP_VERSION
 from app.api import connections, tasks, system, downloads, logs
 
 # Configure logging — console + rotating file in /config/log/
@@ -88,7 +89,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="BauduSync",
     description="Cloud sync for NAS - Baidu Netdisk & 115 Netdisk",
-    version="1.0.0",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -119,7 +120,7 @@ async def index():
 async def api_root():
     return {
         "name": "BauduSync API",
-        "version": "1.0.0",
+        "version": APP_VERSION,
         "endpoints": [
             "/api/connections",
             "/api/tasks",

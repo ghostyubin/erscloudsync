@@ -23,6 +23,14 @@ NC='\033[0m'
 echo -e "${GREEN}BauduSync Docker Build Script${NC}"
 echo "================================"
 
+# Stamp the build version (DEV_YYYYMMDDHHMM) unless explicitly skipped.
+# Every rebuild gets a fresh stamp so the UI shows which build is running.
+if [ "${SKIP_BUMP:-0}" != "1" ]; then
+    python3 "$(dirname "$0")/bump_version.py" || echo -e "${YELLOW}Warning: version bump failed, using existing value${NC}"
+fi
+echo "Version: $(python3 "$(dirname "$0")/bump_version.py" --print 2>/dev/null || echo unknown)"
+echo ""
+
 # Check if buildx is available
 if ! docker buildx version &>/dev/null; then
     echo -e "${RED}Error: docker buildx is not available${NC}"

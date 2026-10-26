@@ -155,13 +155,15 @@ const App = {
             container.innerHTML = tasks.map(t => this.renderSyncCard(t)).join('');
         }
 
-        // Load system info for storage bar
+        // Load system info for storage bar + build version
         try {
             const info = await this.api('GET', '/api/system/info');
             const disk = info.disk;
             document.getElementById('disk-usage-text').textContent =
                 `${this.formatSize(disk.used)} / ${this.formatSize(disk.total)}`;
             document.getElementById('disk-bar-fill').style.width = disk.usage_percent + '%';
+            const verEl = document.getElementById('sidebar-version');
+            if (verEl && info.version) verEl.textContent = info.version;
         } catch (e) {}
     },
 
@@ -1060,7 +1062,7 @@ const App = {
         try {
             const info = await this.api('GET', '/api/system/info');
             const el = id => document.getElementById(id);
-            if (el('settings-info-version'))  el('settings-info-version').textContent  = info.version || 'v0.1.0';
+            if (el('settings-info-version'))  el('settings-info-version').textContent  = info.version || '—';
             if (el('settings-info-data'))     el('settings-info-data').textContent     = info.data_dir || '—';
             if (el('settings-info-download')) el('settings-info-download').textContent = info.download_dir || '—';
             if (el('settings-info-sync'))     el('settings-info-sync').textContent     = info.sync_dir || '—';
