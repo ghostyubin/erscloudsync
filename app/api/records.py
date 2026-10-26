@@ -85,9 +85,11 @@ async def retry_all():
     """Re-queue every failed and skipped record in one go.
 
     Same per-file path as the single-row retry: clear the ignore flag and the
-    backoff entry, then start one sync per affected task (a running sync just
-    picks the files up in its current cycle). Rows are left in place until the
-    file actually goes through, at which point the success write removes them.
+    backoff entry, then guarantee one sync per affected task — running tasks
+    get a follow-up cycle via ``request_sync`` (a bare spawn would be a no-op
+    and the files would wait for a disk event that may never come). Rows are
+    left in place until the file actually goes through, at which point the
+    success write removes them.
     """
     records = await db.db_list_retryable_records()
     if not records:
@@ -112,16 +114,15 @@ async def retry_all():
         resolved += 1
 
     started = []
-    already_running = []
+    follow_up = []
     for task_id, task in touched.items():
-        if SyncEngine.is_running(task_id):
-            already_running.append(task.get("name") or f"#{task_id}")
-        else:
-            SyncEngine.spawn(task_id)
+        if SyncEngine.request_sync(task_id) == "started":
             started.append(task.get("name") or f"#{task_id}")
+        else:
+            follow_up.append(task.get("name") or f"#{task_id}")
 
     logger.info("Retry-all: %d record(s) re-queued across %d task(s)",
                 resolved, len(touched))
     return {"queued": resolved, "records": len(records),
             "tasks": list(touched.keys()),
-            "started": started, "already_running": already_running}
+            "started": started, "already_running": follow_up}

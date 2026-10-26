@@ -167,6 +167,46 @@ class SyncEngine:
         t.add_done_callback(cls._bg_tasks.discard)
         return t
 
+    # Tasks that must get another full cycle once the current one finishes.
+    # A "retry this file" click during a running realtime sync used to assume
+    # the file would join the cycle in flight — but that cycle computed its
+    # operation list before the click, and a quiet directory never generates
+    # another event, so the file waited indefinitely for the next one.
+    _pending_rescan: set[int] = set()
+
+    @classmethod
+    def request_sync(cls, task_id: int, **kwargs) -> str:
+        """Guarantee one full scan of this task, sooner or later.
+
+        Returns "started" when a cycle was spawned right away, "queued" when
+        it will run right after the current one finishes.
+        """
+        if task_id not in cls._running_tasks:
+            cls.spawn(task_id, **kwargs)
+            return "started"
+
+        if task_id in cls._pending_rescan:
+            return "queued"  # someone already asked; one extra cycle suffices
+
+        cls._pending_rescan.add(task_id)
+
+        async def _waiter():
+            try:
+                while task_id in cls._running_tasks:
+                    await asyncio.sleep(0.5)
+                cls._pending_rescan.discard(task_id)
+                # sync_task refuses concurrent runs; if something else snuck
+                # in during the handover it returns immediately and the file
+                # rides that cycle instead — same outcome either way.
+                await cls.sync_task(task_id, **kwargs)
+            except Exception:  # noqa: BLE001 - never crash the waiter
+                cls._pending_rescan.discard(task_id)
+
+        t = asyncio.create_task(_waiter())
+        cls._bg_tasks.add(t)
+        t.add_done_callback(cls._bg_tasks.discard)
+        return "queued"
+
     @classmethod
     def get_progress(cls, task_id: int) -> Optional[SyncProgress]:
         return cls._progress.get(task_id)

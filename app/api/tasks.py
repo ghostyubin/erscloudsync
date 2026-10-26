@@ -361,11 +361,13 @@ async def retry_record(task_id: int, record_id: int):
     await db.db_remove_ignored(task_id, rel)
     await db.db_clear_failure(task_id, rel)
 
-    running = SyncEngine.is_running(task_id)
-    if not running:
-        SyncEngine.spawn(task_id)
-    return {"status": "queued" if running else "syncing",
-            "path": rel, "already_running": running}
+    # request_sync, not spawn: a bare spawn is a no-op while a cycle is
+    # running, and that cycle's operation list was computed before this
+    # click — a quiet directory would then never produce the event that
+    # picks the file back up.
+    mode = SyncEngine.request_sync(task_id)
+    return {"status": mode, "path": rel,
+            "already_running": mode == "queued"}
 
 
 @router.delete("/{task_id}/ignore-file")

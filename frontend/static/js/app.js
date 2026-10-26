@@ -1018,7 +1018,7 @@ const App = {
             const res = await this.api('POST',
                 `/api/tasks/${taskId}/records/${recordId}/retry`);
             if (res && res.already_running) {
-                this.toast('已清除状态，本轮同步会带上该文件', 'success');
+                this.toast('已清除状态，当前轮同步结束后自动补跑一轮', 'success');
             } else {
                 this.toast('已重新排队，正在同步', 'success');
             }
@@ -1066,7 +1066,7 @@ const App = {
                 this.toast('没有需要重试的记录', 'info');
             } else {
                 const where = res.already_running && res.already_running.length
-                    ? `并入正在运行的任务（${res.already_running.join('、')}）`
+                    ? `当前轮结束后自动补跑（${res.already_running.join('、')}）`
                     : `已启动任务（${(res.started || []).join('、')}）`;
                 this.toast(`已重新排队 ${res.queued} 条记录，${where}`, 'success');
             }
