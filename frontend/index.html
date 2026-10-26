@@ -576,6 +576,10 @@
                 <label>最大文件大小 (MB, 0=不限制)</label>
                 <input type="number" id="task-max-size" class="input" value="0" min="0">
             </div>
+            <div class="form-group" id="task-ignored-group" style="display:none;">
+                <label>已忽略的文件 <span class="text-muted" style="font-weight:400">（不再参与同步）</span></label>
+                <div id="task-ignored-list" class="ignored-list"></div>
+            </div>
         </div>
         <div class="modal-footer">
             <button class="btn btn-secondary" onclick="app.closeModal('modal-task')">取消</button>

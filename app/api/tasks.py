@@ -236,6 +236,86 @@ async def cancel_transfer(task_id: int, req: CancelTransferRequest):
     return {"status": "cancelled", "transfer_id": req.transfer_id}
 
 
+class IgnoreFileRequest(BaseModel):
+    # Absolute local path, absolute remote path or task-relative path — the
+    # normaliser below turns all three into the same key.
+    path: str
+    action: str = ""
+
+
+def _task_rel_path(task: dict, raw_path: str) -> str:
+    """Normalise any of the paths the UI might send into a relative key."""
+    raw = (raw_path or "").strip().replace("\\", "/")
+    if not raw:
+        raise HTTPException(400, "path is required")
+    for base in (task.get("local_path") or "", task.get("remote_path") or ""):
+        base = (base or "").rstrip("/")
+        if base and (raw == base or raw.startswith(base + "/")):
+            raw = raw[len(base):]
+            break
+    rel = "/" + raw.lstrip("/")
+    # Same shape the engine stores: forward slashes, single leading slash.
+    return rel.replace("//", "/")
+
+
+@router.get("/{task_id}/ignored")
+async def list_ignored(task_id: int):
+    """Files the user skipped — they are no longer queued for transfer."""
+    task = await db.db_get_task(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    return {"ignored": await db.db_list_ignored(task_id)}
+
+
+@router.post("/{task_id}/ignore-file")
+async def ignore_file(task_id: int, req: IgnoreFileRequest):
+    """Permanently skip one file for this task.
+
+    "Skip" in the transfer list used to only abort the in-flight transfer, so
+    the very next cycle queued the same file again. This persists the decision.
+    """
+    task = await db.db_get_task(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    rel = _task_rel_path(task, req.path)
+    await db.db_add_ignored(task_id, rel, req.action or "")
+    # A file that is ignored should not carry a stale backoff entry around.
+    await db.db_clear_failure(task_id, rel)
+    return {"ignored": True, "path": rel}
+
+
+@router.delete("/{task_id}/ignore-file")
+async def unignore_file(task_id: int, path: str):
+    """Undo a skip so the file is picked up on the next scan."""
+    task = await db.db_get_task(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    rel = _task_rel_path(task, path)
+    await db.db_remove_ignored(task_id, rel)
+    await db.db_clear_failure(task_id, rel)
+    return {"ignored": False, "path": rel}
+
+
+@router.get("/{task_id}/failures")
+async def list_failures(task_id: int):
+    """Files currently waiting out a retry backoff (for the UI to explain)."""
+    failures = await db.db_get_failures(task_id)
+    now = time.time()
+    out = []
+    for rel, row in failures.items():
+        out.append({
+            "path": rel,
+            "attempts": row.get("attempts", 0),
+            "last_error": row.get("last_error", ""),
+            "last_error_at": row.get("last_error_at", 0),
+            "next_retry_at": row.get("next_retry_at", 0),
+            "retry_in": max(0, round(float(row.get("next_retry_at") or 0) - now)),
+        })
+    out.sort(key=lambda x: x["next_retry_at"])
+    return {"failures": out}
+
+
+
 @router.get("/{task_id}/logs")
 async def get_logs(task_id: int, limit: int = 200, offset: int = 0):
     logs = await db.db_list_logs(task_id, limit, offset)

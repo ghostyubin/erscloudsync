@@ -112,12 +112,43 @@ CREATE TABLE IF NOT EXISTS sync_records (
     status TEXT NOT NULL DEFAULT 'success'
         CHECK(status IN ('success', 'failed')),
     error TEXT DEFAULT '',
+    -- How many times this same failure has been seen. A file that keeps
+    -- failing is updated in place instead of inserting one row per retry,
+    -- so a permanently broken file can no longer flood the panel.
+    retry_count INTEGER DEFAULT 0,
     created_at REAL DEFAULT (strftime('%s','now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_sync_records_time ON sync_records(created_at);
 CREATE INDEX IF NOT EXISTS idx_sync_records_action ON sync_records(action);
 CREATE INDEX IF NOT EXISTS idx_sync_records_task ON sync_records(task_id);
+
+-- Per-file failure memory: without this, an upload_only task re-attempts a
+-- file it cannot upload on *every* realtime cycle, and writes a fresh failed
+-- record each time. next_retry_at is an exponential backoff deadline.
+CREATE TABLE IF NOT EXISTS sync_failures (
+    task_id INTEGER NOT NULL,
+    file_path TEXT NOT NULL,          -- path relative to the task root
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    last_error_at REAL NOT NULL DEFAULT 0,
+    next_retry_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (task_id, file_path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_failures_retry
+    ON sync_failures(task_id, next_retry_at);
+
+-- Files the user explicitly skipped. "Skip" in the UI means "stop offering
+-- this file", not "abort the transfer that is running right now", so it has
+-- to survive the cycle that produced it.
+CREATE TABLE IF NOT EXISTS sync_ignored (
+    task_id INTEGER NOT NULL,
+    file_path TEXT NOT NULL,          -- path relative to the task root
+    action TEXT NOT NULL DEFAULT '',  -- upload / download, for the listing
+    created_at REAL DEFAULT (strftime('%s','now')),
+    PRIMARY KEY (task_id, file_path)
+);
 
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -160,6 +191,17 @@ async def init_db():
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=NORMAL")
         await db.executescript(SCHEMA)
+        # Columns added after a table already exists. CREATE TABLE IF NOT
+        # EXISTS does nothing on an existing table, so upgrades need the ALTER
+        # path. "duplicate column name" is the expected, harmless outcome on a
+        # database that already has it.
+        for stmt in (
+            "ALTER TABLE sync_records ADD COLUMN retry_count INTEGER DEFAULT 0",
+        ):
+            try:
+                await db.execute(stmt)
+            except Exception:  # noqa: BLE001 - already applied
+                pass
         await db.commit()
 
 
@@ -301,6 +343,11 @@ async def db_delete_task(task_id: int):
     async with aiosqlite.connect(str(DB_PATH)) as db:
         await db.execute("PRAGMA foreign_keys = ON")
         await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        # These two have no foreign key (a task can be deleted while its rows
+        # still carry useful history), so clean them up explicitly — otherwise
+        # a re-created task id would inherit stale backoff/ignore state.
+        await db.execute("DELETE FROM sync_failures WHERE task_id = ?", (task_id,))
+        await db.execute("DELETE FROM sync_ignored WHERE task_id = ?", (task_id,))
         await db.commit()
 
 
@@ -417,6 +464,30 @@ async def db_add_record(task_id: int, action: str, *,
     """Record a file that was uploaded, downloaded or deleted."""
     global _record_writes
     async with aiosqlite.connect(str(DB_PATH)) as db:
+        if status == "failed":
+            # A file that cannot be transferred used to append one row per
+            # retry, and a realtime task retries every cycle — the panel filled
+            # up with identical failures. Collapse repeats into the newest row
+            # for the same target and keep a counter instead.
+            cur = await db.execute(
+                """SELECT id FROM sync_records
+                   WHERE task_id = ? AND action = ? AND target = ?
+                     AND status = 'failed'
+                   ORDER BY id DESC LIMIT 1""",
+                (task_id, action, target),
+            )
+            existing = await cur.fetchone()
+            if existing:
+                await db.execute(
+                    """UPDATE sync_records
+                       SET error = ?,
+                           retry_count = COALESCE(retry_count, 0) + 1,
+                           created_at = strftime('%s','now')
+                       WHERE id = ?""",
+                    (error or "", existing[0]),
+                )
+                await db.commit()
+                return
         await db.execute(
             """INSERT INTO sync_records
                (task_id, task_name, connection, action, file_name,
@@ -525,6 +596,118 @@ async def db_record_stats() -> dict:
 async def db_clear_records():
     async with aiosqlite.connect(str(DB_PATH)) as db:
         await db.execute("DELETE FROM sync_records")
+        await db.commit()
+
+
+# ---- Per-file failure memory (exponential backoff) ----
+
+# Seconds to wait before the next attempt, indexed by attempt count - 1. The
+# last value is the ceiling: a file that never succeeds settles at one attempt
+# per hour instead of one per realtime cycle.
+FAILURE_BACKOFF = (60.0, 300.0, 900.0, 3600.0)
+
+
+def failure_backoff(attempts: int) -> float:
+    """Delay before retrying a file that has failed ``attempts`` times."""
+    if attempts <= 0:
+        return 0.0
+    return FAILURE_BACKOFF[min(attempts - 1, len(FAILURE_BACKOFF) - 1)]
+
+
+async def db_mark_failure(task_id: int, file_path: str, error: str) -> float:
+    """Remember one failed attempt; returns the timestamp of the next retry."""
+    now = time.time()
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT attempts FROM sync_failures WHERE task_id = ? AND file_path = ?",
+            (task_id, file_path),
+        )
+        row = await cursor.fetchone()
+        attempts = (int(row["attempts"]) if row else 0) + 1
+        next_retry = now + failure_backoff(attempts)
+        await db.execute(
+            """INSERT INTO sync_failures
+                   (task_id, file_path, attempts, last_error, last_error_at,
+                    next_retry_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(task_id, file_path) DO UPDATE SET
+                   attempts = excluded.attempts,
+                   last_error = excluded.last_error,
+                   last_error_at = excluded.last_error_at,
+                   next_retry_at = excluded.next_retry_at""",
+            (task_id, file_path, attempts, error or "", now, next_retry),
+        )
+        await db.commit()
+    return next_retry
+
+
+async def db_clear_failure(task_id: int, file_path: str):
+    """Forget the failure record — called when the file finally goes through."""
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        await db.execute(
+            "DELETE FROM sync_failures WHERE task_id = ? AND file_path = ?",
+            (task_id, file_path),
+        )
+        await db.commit()
+
+
+async def db_get_failures(task_id: int) -> dict[str, dict]:
+    """All failure records of a task, keyed by relative path."""
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM sync_failures WHERE task_id = ?", (task_id,))
+        return {r["file_path"]: dict(r) for r in await cursor.fetchall()}
+
+
+async def db_clear_failures(task_id: int):
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        await db.execute("DELETE FROM sync_failures WHERE task_id = ?", (task_id,))
+        await db.commit()
+
+
+# ---- Ignored files ----
+
+async def db_add_ignored(task_id: int, file_path: str, action: str = ""):
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        await db.execute(
+            """INSERT INTO sync_ignored (task_id, file_path, action)
+               VALUES (?, ?, ?)
+               ON CONFLICT(task_id, file_path) DO UPDATE SET action = excluded.action""",
+            (task_id, file_path, action or ""),
+        )
+        await db.commit()
+
+
+async def db_remove_ignored(task_id: int, file_path: str):
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        await db.execute(
+            "DELETE FROM sync_ignored WHERE task_id = ? AND file_path = ?",
+            (task_id, file_path),
+        )
+        await db.commit()
+
+
+async def db_get_ignored(task_id: int) -> set[str]:
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        cursor = await db.execute(
+            "SELECT file_path FROM sync_ignored WHERE task_id = ?", (task_id,))
+        return {r[0] for r in await cursor.fetchall()}
+
+
+async def db_list_ignored(task_id: int) -> list[dict]:
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """SELECT * FROM sync_ignored WHERE task_id = ?
+               ORDER BY created_at DESC""", (task_id,))
+        return [dict(r) for r in await cursor.fetchall()]
+
+
+async def db_clear_ignored(task_id: int):
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        await db.execute("DELETE FROM sync_ignored WHERE task_id = ?", (task_id,))
         await db.commit()
 
 

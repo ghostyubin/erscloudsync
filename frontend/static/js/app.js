@@ -148,6 +148,16 @@ const App = {
         return div.innerHTML;
     },
 
+    // For values embedded in a single-quoted inline handler: escape() does not
+    // touch quotes, and a file name with an apostrophe would break the call.
+    escapeAttr(str) {
+        return String(str == null ? '' : str)
+            .replace(/\\/g, '\\\\')
+            .replace(/'/g, "\\'")
+            .replace(/"/g, '&quot;')
+            .replace(/[\r\n]/g, ' ');
+    },
+
     // ---- Dashboard ----
     async loadDashboard() {
         await this.loadTasks();
@@ -315,7 +325,7 @@ const App = {
                                 <div class="transfer-file-icon">${actionIcon}</div>
                                 <div class="transfer-filename">${this.escape(this.basename(t.file_path))}</div>
                             </div>
-                            <button class="transfer-cancel-btn" title="跳过此文件" onclick="app.cancelTransfer(${task.id}, ${t.transfer_id})">
+                            <button class="transfer-cancel-btn" title="跳过此文件（不再同步）" onclick="app.skipFile(${task.id}, ${t.transfer_id}, '${this.escapeAttr(t.file_path || '')}')">
                                 <svg viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
                             </button>
                         </div>
@@ -864,6 +874,7 @@ const App = {
             select.innerHTML = '<option value="">选择连接...</option>' +
                 data.connections.map(c => `<option value="${c.id}">${this.escape(c.name)} (${c.type})</option>`).join('');
         } catch (e) { this.toast('加载连接失败', 'error'); }
+        document.getElementById('task-ignored-group').style.display = 'none';
         this.openModal('modal-task');
     },
 
@@ -890,6 +901,7 @@ const App = {
             select.innerHTML = '<option value="">选择连接...</option>' +
                 data.connections.map(c => `<option value="${c.id}" ${c.id === task.connection_id ? 'selected' : ''}>${this.escape(c.name)} (${c.type})</option>`).join('');
         } catch (e) {}
+        await this._renderIgnoredList(id);
         this.openModal('modal-task');
     },
 
@@ -955,6 +967,63 @@ const App = {
             this.toast('已跳过该文件', 'info');
             // No need to refresh the entire view; progress polling will pick it up
         } catch (e) { this.toast('跳过失败: ' + e.message, 'error'); }
+    },
+
+    // "Skip" has to mean "stop offering me this file", not "abort this one
+    // transfer": the latter left the file queued for the very next cycle, which
+    // is why a skipped file came straight back. Cancel the live transfer AND
+    // record the decision.
+    async skipFile(taskId, transferId, filePath) {
+        try {
+            if (filePath) {
+                await this.api('POST', `/api/tasks/${taskId}/ignore-file`, {
+                    path: filePath,
+                    action: '',
+                });
+            }
+            if (transferId != null) {
+                try {
+                    await this.api('POST', `/api/tasks/${taskId}/cancel-transfer`,
+                                   { transfer_id: transferId });
+                } catch (e) {
+                    // The transfer may have finished between render and click.
+                }
+            }
+            this.toast('已跳过，该文件不再同步（可在任务设置里恢复）', 'info');
+        } catch (e) {
+            this.toast('跳过失败: ' + e.message, 'error');
+        }
+    },
+
+    async restoreIgnored(taskId, path) {
+        try {
+            await this.api('DELETE',
+                `/api/tasks/${taskId}/ignore-file?path=${encodeURIComponent(path)}`);
+            this.toast('已恢复同步', 'success');
+            await this._renderIgnoredList(taskId);
+        } catch (e) {
+            this.toast('恢复失败: ' + e.message, 'error');
+        }
+    },
+
+    async _renderIgnoredList(taskId) {
+        const group = document.getElementById('task-ignored-group');
+        const list = document.getElementById('task-ignored-list');
+        if (!group || !list) return;
+        if (!taskId) { group.style.display = 'none'; return; }
+        try {
+            const data = await this.api('GET', `/api/tasks/${taskId}/ignored`);
+            const items = data.ignored || [];
+            if (!items.length) { group.style.display = 'none'; return; }
+            group.style.display = 'block';
+            list.innerHTML = items.map(it => `
+                <div class="ignored-item">
+                    <span class="path" title="${this.escape(it.file_path)}">${this.escape(it.file_path)}</span>
+                    <button class="restore" onclick="app.restoreIgnored(${taskId}, '${this.escapeAttr(it.file_path)}')">恢复</button>
+                </div>`).join('');
+        } catch (e) {
+            group.style.display = 'none';
+        }
     },
 
     // Refresh whatever view is currently active so state changes (pause/resume) are reflected immediately
@@ -1629,7 +1698,7 @@ const App = {
                         <span>${time}</span>
                         <span class="rec-sep">·</span>
                         <span class="rec-task">${taskName}</span>
-                        ${failed ? `<span class="rec-fail" title="${this.escape(r.error || '')}">失败</span>` : ''}
+                        ${failed ? `<span class="rec-fail" title="${this.escape(r.error || '')}">失败${(r.retry_count || 0) > 0 ? ` ×${(r.retry_count || 0) + 1}` : ''}</span>` : ''}
                     </div>
                 </div>
             </div>`;

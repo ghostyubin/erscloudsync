@@ -636,6 +636,50 @@ body {
   color: #fff;
 }
 
+/* Ignored-file list inside the task editor */
+.ignored-list {
+  max-height: 150px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.ignored-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.ignored-item + .ignored-item {
+  border-top: 1px solid var(--border-light);
+}
+
+.ignored-item .path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.ignored-item .restore {
+  border: none;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+.ignored-item .restore:hover {
+  text-decoration: underline;
+}
+
 .sync-card-body {
   display: flex;
   flex-direction: column;

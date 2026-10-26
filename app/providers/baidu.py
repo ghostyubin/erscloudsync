@@ -88,6 +88,11 @@ MAX_SIMPLE_UPLOAD_SIZE = 4 * 1024 * 1024  # 4MB - use simple upload below this
 BLOCK_SIZE = 4 * 1024 * 1024  # 4MB blocks for chunked upload
 DOWNLOAD_CHUNK_SIZE = 256 * 1024  # 256KB chunks for download progress reporting
 
+# MD5 of the empty string. A 0-byte upload must send this as its single block
+# MD5: precreate rejects an empty block_list with errno 2, which reads like
+# "file not found" and sent us hunting for a path bug that was never there.
+EMPTY_FILE_MD5 = "d41d8cd98f00b204e9800998ecf8427e"
+
 
 class BaiduProvider(CloudProvider):
     """Baidu Netdisk provider using Pan Open API."""
@@ -463,6 +468,15 @@ class BaiduProvider(CloudProvider):
             return md5_list
 
         block_md5_list = await asyncio.to_thread(_calc_md5s)
+
+        if file_size == 0:
+            # An empty file yields num_blocks=0, i.e. an empty block_list, and
+            # Baidu answers that precreate with errno 2 ("no such file") — the
+            # message is misleading but the fix is to send the MD5 of the empty
+            # string as the single (empty) block. precreate then returns an
+            # uploadid with no blocks to send, so the block loop below is a
+            # no-op and only the final create runs.
+            block_md5_list = [EMPTY_FILE_MD5]
 
         # 1. Precreate (retried — a hiccup here would otherwise fail the
         # whole file before a single byte is sent)

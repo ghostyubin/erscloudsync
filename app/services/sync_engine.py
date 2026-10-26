@@ -306,9 +306,25 @@ class SyncEngine:
             sync_state = await db.db_get_sync_state(task_id)
             last_state = {s["file_path"]: s for s in sync_state}
 
+            # Files the user told us to leave alone, and files that are still
+            # inside their retry backoff window. Both are decided per cycle, so
+            # a realtime task stops re-offering them every few seconds.
+            ignored = await db.db_get_ignored(task_id)
+            failures = await db.db_get_failures(task_id)
+            if failures:
+                # A file edited after its last failure is a different problem
+                # (or the same one fixed), so it deserves an immediate retry
+                # instead of waiting out a backoff that can be an hour long.
+                for rel, row in list(failures.items()):
+                    lf = local_map.get(rel)
+                    if lf and lf.modify_time > (row.get("last_error_at") or 0):
+                        await db.db_clear_failure(task_id, rel)
+                        failures.pop(rel, None)
+
             # Compute operations
             operations = cls._compute_operations(
-                local_map, remote_map, last_state, sync_mode, local_base, remote_base
+                local_map, remote_map, last_state, sync_mode, local_base, remote_base,
+                ignored=ignored, failures=failures,
             )
 
             # Only files that actually need work count towards the progress
@@ -439,15 +455,37 @@ class SyncEngine:
     @classmethod
     def _compute_operations(cls, local_map: dict, remote_map: dict,
                             last_state: dict, sync_mode: str,
-                            local_base: str, remote_base: str) -> list[SyncOperation]:
-        """Compute sync operations based on file comparison."""
+                            local_base: str, remote_base: str,
+                            ignored: Optional[set] = None,
+                            failures: Optional[dict] = None) -> list[SyncOperation]:
+        """Compute sync operations based on file comparison.
+
+        ``ignored`` are relative paths the user explicitly skipped, and
+        ``failures`` holds the backoff state per relative path. Both make the
+        file a SKIP instead of an operation, which is what stops a realtime
+        task from retrying a doomed file on every cycle.
+        """
         operations = []
         all_paths = set(local_map.keys()) | set(remote_map.keys())
+        ignored = ignored or set()
+        failures = failures or {}
+        now = time.time()
 
         for rel_path in sorted(all_paths):
             local_file = local_map.get(rel_path)
             remote_file = remote_map.get(rel_path)
             last = last_state.get(rel_path)
+
+            if rel_path in ignored:
+                operations.append(SyncOperation(
+                    action=SyncAction.SKIP, reason="Ignored by user"))
+                continue
+
+            fail = failures.get(rel_path)
+            if fail and float(fail.get("next_retry_at") or 0) > now:
+                operations.append(SyncOperation(
+                    action=SyncAction.SKIP, reason="Waiting for retry"))
+                continue
 
             local_changed = False
             remote_changed = False
@@ -656,6 +694,12 @@ class SyncEngine:
                             f"Uploaded {op.local_path}")
                         await _add_record(record_ctx, "upload", op.local_path,
                                           op.remote_path, file_size)
+                        try:
+                            await db.db_clear_failure(
+                                task_id, cls._rel_path(op.local_path, local_base))
+                        except Exception:  # noqa: BLE001 - bookkeeping only
+                            logger.debug("Could not clear failure for %s",
+                                         op.local_path, exc_info=True)
                         # Record state right away: the maps used at the end of
                         # the cycle are pre-transfer snapshots, so a completed
                         # upload would otherwise stay unrecorded if the run is
@@ -716,6 +760,12 @@ class SyncEngine:
                             f"Downloaded to {op.local_path}")
                         await _add_record(record_ctx, "download", op.remote_path,
                                           op.local_path, done_size)
+                        try:
+                            await db.db_clear_failure(
+                                task_id, cls._rel_path(op.remote_path, remote_base))
+                        except Exception:  # noqa: BLE001 - bookkeeping only
+                            logger.debug("Could not clear failure for %s",
+                                         op.remote_path, exc_info=True)
                         # Same reasoning as the upload path: persist the state
                         # immediately and carry the remote md5 over, so the
                         # next cycle can tell "already downloaded" apart from
@@ -772,6 +822,17 @@ class SyncEngine:
                         src, dst = op.remote_path, op.local_path
                     await _add_record(record_ctx, op.action.value, src, dst,
                                       status="failed", error=str(e))
+                # Remember the failure so the next cycle can back off instead
+                # of hammering the same file (and the same record) again.
+                if op.action in (SyncAction.UPLOAD, SyncAction.DOWNLOAD):
+                    rel = cls._rel_path(
+                        op.local_path if op.action == SyncAction.UPLOAD else op.remote_path,
+                        local_base if op.action == SyncAction.UPLOAD else remote_base)
+                    try:
+                        await db.db_mark_failure(task_id, rel, str(e))
+                    except Exception:  # noqa: BLE001 - bookkeeping only
+                        logger.debug("Could not record failure for %s", rel,
+                                     exc_info=True)
                 raise
 
             return "skipped"
