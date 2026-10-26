@@ -22,6 +22,11 @@ const App = {
         this.bindNav();
         this.loadAll();
         this.startProgressPolling();
+        // Leaving the drawer open while rotating to landscape would cover the
+        // page with a 250px-wide panel, so close it once a desktop width is back.
+        window.addEventListener('resize', () => {
+            if (window.innerWidth > 900) this.closeSidebar();
+        });
     },
 
     bindNav() {
@@ -39,8 +44,25 @@ const App = {
         });
     },
 
+    // ---- Mobile sidebar drawer ----
+    toggleSidebar(force) {
+        const sidebar = document.querySelector('.sidebar');
+        const backdrop = document.getElementById('nav-backdrop');
+        if (!sidebar) return;
+        const open = (force === undefined)
+            ? !sidebar.classList.contains('open') : !!force;
+        sidebar.classList.toggle('open', open);
+        if (backdrop) backdrop.classList.toggle('show', open);
+        document.body.classList.toggle('nav-open', open);
+    },
+
+    closeSidebar() {
+        this.toggleSidebar(false);
+    },
+
     switchView(view) {
         this.currentView = view;
+        this.closeSidebar();
         // Map sub-views to their parent nav item for active highlighting
         const navMap = { logs: 'settings' };
         const activeNav = navMap[view] || view;

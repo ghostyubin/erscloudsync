@@ -1956,26 +1956,277 @@ details[open] summary::before { transform: rotate(90deg); }
 
 /* ============================================================
    Responsive
+   ------------------------------------------------------------
+   ≤900px : sidebar collapses to an icon rail (tablet / small laptop)
+   ≤640px : sidebar becomes an off-canvas drawer, single-column cards,
+            full-screen modals, stacked progress footer
    ============================================================ */
-@media (max-width: 768px) {
+
+/* Mobile-only chrome, inert on desktop */
+.nav-toggle,
+.nav-backdrop {
+  display: none;
+}
+
+@media (max-width: 900px) {
   .sidebar {
-    width: 60px;
+    width: 64px;
+  }
+  .sidebar-header {
+    padding: 18px 0 14px;
+    justify-content: center;
   }
   .sidebar-title, .nav-item span, .sidebar-footer,
   .nav-group-label, .nav-badge {
     display: none;
   }
+  .nav-list { padding: 4px 8px; }
   .nav-item {
     justify-content: center;
     padding: 12px;
   }
   .stats-grid {
     grid-template-columns: 1fr 1fr;
+    padding: 12px 16px 0;
+    gap: 12px;
   }
   .form-row { flex-direction: column; }
   .conn-type-selector { flex-direction: column; }
   .radio-group { flex-direction: column; }
   .page-topbar { padding: 16px 16px 0; }
-  .stats-grid { padding: 12px 16px 0; }
   .content-area { padding: 12px 16px 16px; }
+  .conn-tabs { padding: 0 16px; }
+}
+
+@media (max-width: 640px) {
+  #app { height: 100dvh; }
+
+  /* --- Sidebar as a drawer --- */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(78vw, 300px);
+    z-index: 250;
+    transform: translateX(-102%);
+    transition: transform 0.22s ease;
+    box-shadow: 8px 0 32px rgba(3, 7, 18, 0.18);
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .sidebar.open { transform: translateX(0); }
+
+  .nav-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(3, 7, 18, 0.42);
+    z-index: 240;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.22s ease;
+  }
+  .nav-backdrop.show {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .nav-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    top: calc(10px + env(safe-area-inset-top));
+    left: 10px;
+    width: 40px;
+    height: 40px;
+    z-index: 300;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    color: var(--text-primary);
+    box-shadow: var(--shadow-sm);
+    cursor: pointer;
+    transition: opacity 0.18s ease;
+  }
+  .nav-toggle:active { background: var(--surface-2); }
+  /* the drawer covers the toggle, so fade it out instead of overlapping */
+  body.nav-open .nav-toggle {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* undo the icon-only rail inside the drawer */
+  .sidebar-header {
+    padding: 20px 20px 16px;
+    justify-content: flex-start;
+  }
+  .sidebar-title,
+  .nav-item span,
+  .nav-badge {
+    display: inline-flex;
+  }
+  .sidebar-footer,
+  .nav-group-label {
+    display: block;
+  }
+  .nav-list { padding: 4px 10px; }
+  .nav-item {
+    justify-content: flex-start;
+    padding: 12px 14px;
+  }
+  .nav-item span { margin-left: 2px; }
+
+  /* --- Page chrome --- */
+  .page-topbar {
+    position: sticky;
+    top: 0;
+    z-index: 90;
+    background: var(--bg);
+    padding: 12px 14px 10px 58px;
+    min-height: 52px;
+    padding-top: calc(12px + env(safe-area-inset-top));
+  }
+  .page-title { font-size: 18px; }
+  .topbar-actions { gap: 8px; }
+  .btn-add { height: 38px; padding: 0 14px; font-size: 13px; }
+  .btn-refresh { width: 38px; height: 38px; }
+  .content-area { padding: 12px 14px calc(20px + env(safe-area-inset-bottom)); }
+
+  /* --- Stats --- */
+  .stats-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    padding: 12px 14px 0;
+  }
+  .stat-card { padding: 12px; gap: 10px; }
+  .stat-icon { width: 36px; height: 36px; }
+  .stat-num { font-size: 22px; }
+  .stat-label { font-size: 11px; margin-bottom: 2px; }
+
+  /* --- Sync card --- */
+  .sync-card { border-radius: var(--radius-md); margin-bottom: 12px; }
+  .sync-card-hd { padding: 10px 12px; align-items: flex-start; }
+  .sync-card-hd-actions { margin-left: auto; }
+  .card-icon-btn { width: 32px; height: 32px; }
+  .sync-card-name { font-size: 13px; }
+  .sync-card-body { padding: 10px 12px; gap: 8px; }
+
+  .paths-box {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+    padding: 6px 10px;
+  }
+  .path-arrow { display: none; }
+  .path-row { gap: 6px; }
+
+  .transfer-widget { padding: 10px 12px 8px; }
+  .transfer-bottom { flex-wrap: wrap; row-gap: 4px; }
+
+  /* Stack bar above label so "9/9 · 100% · 无变化 83" never overflows */
+  .overall-progress {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+  .overall-progress-text {
+    text-align: right;
+    white-space: normal;
+    font-size: 11px;
+  }
+
+  /* --- Task list --- */
+  .task-item {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    padding: 12px 14px;
+  }
+  .task-item-detail { gap: 4px 12px; font-size: 12px; }
+  .task-item-actions { flex-wrap: wrap; }
+  .task-item-actions .btn { flex: 1 1 40%; }
+
+  /* --- Cloud files --- */
+  .conn-tabs { padding: 0 8px; }
+  .conn-tab { padding: 10px 12px; font-size: 13px; }
+  .cloud-files-toolbar { flex-wrap: wrap; gap: 8px; }
+  .cloud-files-path {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cloud-files-item { padding: 10px 12px; gap: 8px; }
+  .cloud-files-item-icon { font-size: 18px; }
+  .cloud-files-item-name { font-size: 13px; }
+  .cloud-files-item-download { padding: 5px 8px; font-size: 11px; }
+
+  /* --- Downloads --- */
+  .download-item { padding: 12px 14px; }
+  .download-item-header { flex-wrap: wrap; gap: 8px; }
+  .download-item-name { white-space: normal; }
+  .download-item-footer { flex-wrap: wrap; row-gap: 4px; }
+
+  /* --- Logs --- */
+  .logs-container {
+    padding: 10px;
+    border-radius: var(--radius-md);
+    font-size: 11.5px;
+    max-height: none;
+  }
+  .log-entry {
+    flex-wrap: wrap;
+    gap: 0 8px;
+    padding: 6px 0;
+  }
+  .log-time { min-width: 0; font-size: 11px; }
+  .log-action { width: auto; }
+  .log-task { max-width: none; }
+  .log-detail { flex-basis: 100%; }
+
+  /* --- Settings / about --- */
+  .settings-section { margin-bottom: 22px; }
+  .settings-section-header { flex-wrap: wrap; gap: 10px; }
+  .conn-card { padding: 16px; }
+  .conn-card-actions .btn { flex: 1 1 46%; }
+  .about-card { padding: 26px 18px 20px; margin: 12px auto; }
+
+  /* --- Forms: 16px avoids iOS auto-zoom on focus --- */
+  .input, .select, textarea { font-size: 16px; }
+  .btn { min-height: 40px; }
+  .btn-sm { min-height: 34px; }
+  .browser-root-switcher { flex-wrap: wrap; }
+  .browser-item { padding: 10px 12px; }
+  .browser-item-name { font-size: 13px; }
+
+  /* --- Modals: full screen --- */
+  .modal { align-items: stretch; }
+  .modal-content {
+    width: 100%;
+    max-width: 100%;
+    height: 100%;
+    max-height: 100dvh;
+    border-radius: 0;
+  }
+  .modal-header {
+    padding: 14px 16px;
+    padding-top: calc(14px + env(safe-area-inset-top));
+  }
+  .modal-body { padding: 16px; }
+  .modal-footer {
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  }
+  .modal-footer .btn { flex: 1; }
+  .conn-type-card { padding: 18px 16px; }
+  .qr-container { flex-direction: column; }
+
+  /* --- Toasts --- */
+  #toast-container {
+    top: auto;
+    left: 12px;
+    right: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+  }
+  .toast { min-width: 0; width: 100%; font-size: 13px; }
 }

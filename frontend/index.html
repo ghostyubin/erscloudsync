@@ -2,12 +2,20 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#f5f6fa">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <title>BauduSync - NAS 云同步</title>
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
 <div id="app">
+    <!-- Mobile nav (hidden on desktop) -->
+    <button id="nav-toggle" class="nav-toggle" aria-label="打开菜单" onclick="app.toggleSidebar()">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M3 6h18v2H3V6zm0 5h18v2H3v-2zm0 5h18v2H3v-2z"/></svg>
+    </button>
+    <div id="nav-backdrop" class="nav-backdrop" onclick="app.closeSidebar()"></div>
     <!-- Sidebar -->
     <nav class="sidebar">
         <div class="sidebar-header">
