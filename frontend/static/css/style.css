@@ -1701,6 +1701,40 @@ body {
 
 .rec-item.rec-failed { background: rgba(239, 68, 68, 0.06); }
 
+/* A user skip is not an error, so it gets a neutral tint instead of red. */
+.rec-item.rec-skipped { background: rgba(148, 163, 184, 0.08); }
+
+/* Retry button on failed/skipped rows. It lives outside .rec-main so the
+   row-wide click handler (which expands the row) cannot swallow it — the
+   markup stops propagation instead. */
+.rec-retry {
+  flex-shrink: 0;
+  align-self: center;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.rec-retry:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--surface);
+}
+
+.rec-retry:disabled {
+  opacity: 0.55;
+  cursor: default;
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+
 .rec-icon {
   width: 26px;
   height: 26px;
@@ -1833,6 +1867,12 @@ body {
 
 .rec-fail {
   color: var(--color-error);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.rec-skip {
+  color: var(--text-muted);
   font-weight: 600;
   flex-shrink: 0;
 }

@@ -325,7 +325,7 @@ const App = {
                                 <div class="transfer-file-icon">${actionIcon}</div>
                                 <div class="transfer-filename">${this.escape(this.basename(t.file_path))}</div>
                             </div>
-                            <button class="transfer-cancel-btn" title="跳过此文件（不再同步）" onclick="app.skipFile(${task.id}, ${t.transfer_id}, '${this.escapeAttr(t.file_path || '')}')">
+                            <button class="transfer-cancel-btn" title="跳过此文件（可在传输记录里重试）" onclick="app.skipFile(${task.id}, ${t.transfer_id}, '${this.escapeAttr(t.file_path || '')}', '${t.action || ''}', ${t.file_size || 0})">
                                 <svg viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
                             </button>
                         </div>
@@ -973,12 +973,13 @@ const App = {
     // transfer": the latter left the file queued for the very next cycle, which
     // is why a skipped file came straight back. Cancel the live transfer AND
     // record the decision.
-    async skipFile(taskId, transferId, filePath) {
+    async skipFile(taskId, transferId, filePath, action, size) {
         try {
             if (filePath) {
                 await this.api('POST', `/api/tasks/${taskId}/ignore-file`, {
                     path: filePath,
-                    action: '',
+                    action: action || '',
+                    size: size || 0,
                 });
             }
             if (transferId != null) {
@@ -989,7 +990,7 @@ const App = {
                     // The transfer may have finished between render and click.
                 }
             }
-            this.toast('已跳过，该文件不再同步（可在任务设置里恢复）', 'info');
+            this.toast('已跳过，可在传输记录里点「重试」恢复', 'info');
         } catch (e) {
             this.toast('跳过失败: ' + e.message, 'error');
         }
@@ -1003,6 +1004,31 @@ const App = {
             await this._renderIgnoredList(taskId);
         } catch (e) {
             this.toast('恢复失败: ' + e.message, 'error');
+        }
+    },
+
+    // Re-queue a single failed or skipped file straight from the transfer
+    // panel. The server clears that file's ignore flag and retry backoff, then
+    // spawns a sync, so it goes through the normal scan rather than a special
+    // one-off path. If a sync is already running the file is simply picked up
+    // by the current cycle.
+    async retryRecord(taskId, recordId, btn) {
+        if (btn) { btn.disabled = true; btn.textContent = '重试中'; }
+        try {
+            const res = await this.api('POST',
+                `/api/tasks/${taskId}/records/${recordId}/retry`);
+            if (res && res.already_running) {
+                this.toast('已清除状态，本轮同步会带上该文件', 'success');
+            } else {
+                this.toast('已重新排队，正在同步', 'success');
+            }
+            // The old row stays in place until it succeeds; a fresh success row
+            // then appears above it, so the reload keeps both visible.
+            await this.loadRecords(true);
+        } catch (e) {
+            this.toast('重试失败: ' + e.message, 'error');
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = '重试'; }
         }
     },
 
@@ -1544,6 +1570,7 @@ const App = {
     _recordsQuery: '',
     _recordsAction: '',
     _recordsTask: '',
+    _recordsStatus: '',
     _recordsSearchTimer: null,
 
     openRecords() {
@@ -1552,7 +1579,8 @@ const App = {
         this._recordsQuery = '';
         this._recordsAction = '';
         this._recordsTask = '';
-        ['records-search', 'records-filter', 'records-task'].forEach(id => {
+        this._recordsStatus = '';
+        ['records-search', 'records-filter', 'records-task', 'records-status'].forEach(id => {
             const el = document.getElementById(id);
             if (el) el.value = '';
         });
@@ -1591,6 +1619,7 @@ const App = {
             });
             if (this._recordsAction) params.set('action', this._recordsAction);
             if (this._recordsTask) params.set('task_id', this._recordsTask);
+            if (this._recordsStatus) params.set('status', this._recordsStatus);
             if (this._recordsQuery) params.set('q', this._recordsQuery);
             const data = await this.api('GET', '/api/records?' + params.toString());
             const rows = data.records || [];
@@ -1609,8 +1638,10 @@ const App = {
     reloadRecords() {
         const filter = document.getElementById('records-filter');
         const task = document.getElementById('records-task');
+        const status = document.getElementById('records-status');
         this._recordsAction = filter ? filter.value : '';
         this._recordsTask = task ? task.value : '';
+        this._recordsStatus = status ? status.value : '';
         this.loadRecords(true);
     },
 
@@ -1668,6 +1699,7 @@ const App = {
         const leftPath = localFirst ? r.source : r.target;
         const rightPath = localFirst ? r.target : r.source;
         const failed = r.status === 'failed';
+        const skipped = r.status === 'skipped';
         const d = new Date((r.created_at || 0) * 1000);
         const pad = (n) => String(n).padStart(2, '0');
         const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
@@ -1675,7 +1707,7 @@ const App = {
         const size = r.file_size ? this.formatSize(r.file_size) : '';
 
         return `
-            <div class="rec-item${failed ? ' rec-failed' : ''}" onclick="this.classList.toggle('expanded')">
+            <div class="rec-item${failed ? ' rec-failed' : (skipped ? ' rec-skipped' : '')}" onclick="this.classList.toggle('expanded')">
                 <div class="rec-icon rec-icon-${cls}">${this._recordIcon(cls)}</div>
                 <div class="rec-main">
                     <div class="rec-line1">
@@ -1699,8 +1731,11 @@ const App = {
                         <span class="rec-sep">·</span>
                         <span class="rec-task">${taskName}</span>
                         ${failed ? `<span class="rec-fail" title="${this.escape(r.error || '')}">失败${(r.retry_count || 0) > 0 ? ` ×${(r.retry_count || 0) + 1}` : ''}</span>` : ''}
+                        ${skipped ? `<span class="rec-skip" title="${this.escape(r.error || '')}">已跳过</span>` : ''}
                     </div>
                 </div>
+                ${failed || skipped ? `<button class="rec-retry" title="清除失败/跳过状态并立即重试"
+                    onclick="event.stopPropagation(); app.retryRecord(${r.task_id}, ${r.id}, this)">重试</button>` : ''}
             </div>`;
     },
 
@@ -1716,6 +1751,7 @@ const App = {
             if (byAction.download) parts.push(`下载 ${byAction.download}`);
             if (byAction.delete) parts.push(`删除 ${byAction.delete}`);
             if (stats.failed) parts.push(`其中失败 ${stats.failed}`);
+            if (stats.skipped) parts.push(`已跳过 ${stats.skipped}`);
             summary.textContent = parts.join(' · ');
         }
 

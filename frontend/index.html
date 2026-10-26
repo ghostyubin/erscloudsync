@@ -342,6 +342,11 @@
             <select class="select records-filter" id="records-task" onchange="app.reloadRecords()">
                 <option value="">全部任务</option>
             </select>
+            <select class="select records-filter" id="records-status" onchange="app.reloadRecords()">
+                <option value="">全部状态</option>
+                <option value="failed">仅失败</option>
+                <option value="skipped">仅已跳过</option>
+            </select>
             <button class="records-clear" title="清空同步记录" onclick="app.clearRecords()">
                 <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
                 <span>清空</span>

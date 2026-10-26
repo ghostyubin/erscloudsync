@@ -2,10 +2,41 @@
 
 import aiosqlite
 import json
+import logging
 import time
 from typing import Any, Optional
 
 from app.config import DB_PATH
+
+logger = logging.getLogger(__name__)
+
+# DDL for sync_records, kept as its own constant because the upgrade path has
+# to reuse it verbatim: SQLite cannot ALTER a CHECK constraint, so adding a
+# status value means rebuilding the table, and the rebuilt table must not
+# drift from the one a fresh install gets.
+_RECORDS_TABLE_SQL = """CREATE TABLE IF NOT EXISTS sync_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL DEFAULT 0,
+    task_name TEXT NOT NULL DEFAULT '',
+    connection TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL
+        CHECK(action IN ('upload', 'download', 'delete_local', 'delete_remote')),
+    file_name TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    target TEXT NOT NULL DEFAULT '',
+    file_size INTEGER DEFAULT 0,
+    -- 'skipped' is a user decision (the Skip button), not a failure: nothing
+    -- was transferred and nothing went wrong, so it gets its own state.
+    status TEXT NOT NULL DEFAULT 'success'
+        CHECK(status IN ('success', 'failed', 'skipped')),
+    error TEXT DEFAULT '',
+    -- How many times this same failure has been seen. A file that keeps
+    -- failing is updated in place instead of inserting one row per retry,
+    -- so a permanently broken file can no longer flood the panel.
+    retry_count INTEGER DEFAULT 0,
+    created_at REAL DEFAULT (strftime('%s','now'))
+)"""
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS connections (
@@ -98,26 +129,7 @@ CREATE INDEX IF NOT EXISTS idx_sync_history_task ON sync_history(task_id);
 --
 -- No FOREIGN KEY on purpose: task_name / connection are snapshot strings, so
 -- deleting a task must not wipe its transfer history.
-CREATE TABLE IF NOT EXISTS sync_records (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id INTEGER NOT NULL DEFAULT 0,
-    task_name TEXT NOT NULL DEFAULT '',
-    connection TEXT NOT NULL DEFAULT '',
-    action TEXT NOT NULL
-        CHECK(action IN ('upload', 'download', 'delete_local', 'delete_remote')),
-    file_name TEXT NOT NULL DEFAULT '',
-    source TEXT NOT NULL DEFAULT '',
-    target TEXT NOT NULL DEFAULT '',
-    file_size INTEGER DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'success'
-        CHECK(status IN ('success', 'failed')),
-    error TEXT DEFAULT '',
-    -- How many times this same failure has been seen. A file that keeps
-    -- failing is updated in place instead of inserting one row per retry,
-    -- so a permanently broken file can no longer flood the panel.
-    retry_count INTEGER DEFAULT 0,
-    created_at REAL DEFAULT (strftime('%s','now'))
-);
+""" + _RECORDS_TABLE_SQL + """;
 
 CREATE INDEX IF NOT EXISTS idx_sync_records_time ON sync_records(created_at);
 CREATE INDEX IF NOT EXISTS idx_sync_records_action ON sync_records(action);
@@ -202,7 +214,44 @@ async def init_db():
                 await db.execute(stmt)
             except Exception:  # noqa: BLE001 - already applied
                 pass
+        await _migrate_records_status(db)
         await db.commit()
+
+
+async def _migrate_records_status(db):
+    """Rebuild sync_records if its CHECK still only allows success/failed.
+
+    ``CREATE TABLE IF NOT EXISTS`` silently does nothing on an existing table,
+    so a database created before the "skipped" status existed would reject
+    every skip record with an IntegrityError. SQLite has no ALTER ... CHECK,
+    hence the copy-through-rebuild dance (the recommended 12-step procedure).
+    """
+    cursor = await db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='sync_records'")
+    row = await cursor.fetchone()
+    ddl = (row[0] if row else "") or ""
+    if "'skipped'" in ddl:
+        return
+
+    # The old indexes follow the renamed table, so they are dropped together
+    # with it below and have to be recreated afterwards — creating them while
+    # the old names are still taken would be a silent no-op.
+    await db.executescript(f"""
+        ALTER TABLE sync_records RENAME TO sync_records_old;
+        {_RECORDS_TABLE_SQL};
+        INSERT INTO sync_records (id, task_id, task_name, connection, action,
+                                  file_name, source, target, file_size,
+                                  status, error, retry_count, created_at)
+            SELECT id, task_id, task_name, connection, action,
+                   file_name, source, target, file_size,
+                   status, error, COALESCE(retry_count, 0), created_at
+              FROM sync_records_old;
+        DROP TABLE sync_records_old;
+        CREATE INDEX IF NOT EXISTS idx_sync_records_time ON sync_records(created_at);
+        CREATE INDEX IF NOT EXISTS idx_sync_records_action ON sync_records(action);
+        CREATE INDEX IF NOT EXISTS idx_sync_records_task ON sync_records(task_id);
+    """)
+    logger.info("Migrated sync_records: added 'skipped' to the status CHECK")
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -464,30 +513,47 @@ async def db_add_record(task_id: int, action: str, *,
     """Record a file that was uploaded, downloaded or deleted."""
     global _record_writes
     async with aiosqlite.connect(str(DB_PATH)) as db:
-        if status == "failed":
+        if status in ("failed", "skipped"):
             # A file that cannot be transferred used to append one row per
             # retry, and a realtime task retries every cycle — the panel filled
             # up with identical failures. Collapse repeats into the newest row
-            # for the same target and keep a counter instead.
+            # for the same target. Skips are collapsed the same way: a file
+            # skipped, restored and skipped again is one row, not three.
             cur = await db.execute(
                 """SELECT id FROM sync_records
                    WHERE task_id = ? AND action = ? AND target = ?
-                     AND status = 'failed'
+                     AND status = ?
                    ORDER BY id DESC LIMIT 1""",
-                (task_id, action, target),
+                (task_id, action, target, status),
             )
             existing = await cur.fetchone()
             if existing:
+                # retry_count is "how many times this failed again", so a
+                # repeated skip must not inflate it.
+                bump = 1 if status == "failed" else 0
                 await db.execute(
                     """UPDATE sync_records
                        SET error = ?,
-                           retry_count = COALESCE(retry_count, 0) + 1,
+                           retry_count = COALESCE(retry_count, 0) + ?,
                            created_at = strftime('%s','now')
                        WHERE id = ?""",
-                    (error or "", existing[0]),
+                    (error or "", bump, existing[0]),
                 )
                 await db.commit()
                 return
+        elif status == "success":
+            # The file made it through, so any earlier failure / skip row for
+            # the very same target is now stale — and it still carries a Retry
+            # button, which reads as "this is still broken". Drop it: the
+            # success row above it is the current truth. Only rows strictly
+            # older than this one go, so nothing is deleted before the insert
+            # below exists.
+            await db.execute(
+                """DELETE FROM sync_records
+                   WHERE task_id = ? AND action = ? AND target = ?
+                     AND status IN ('failed', 'skipped')""",
+                (task_id, action, target),
+            )
         await db.execute(
             """INSERT INTO sync_records
                (task_id, task_name, connection, action, file_name,
@@ -522,7 +588,7 @@ def _records_where(action: Optional[str] = None, task_id: Optional[int] = None,
     if task_id is not None:
         where.append("task_id = ?")
         params.append(task_id)
-    if status in ("success", "failed"):
+    if status in ("success", "failed", "skipped"):
         where.append("status = ?")
         params.append(status)
     if query:
@@ -561,6 +627,15 @@ async def db_count_records(*, action: Optional[str] = None,
         return int(row[0]) if row else 0
 
 
+async def db_get_record(record_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM sync_records WHERE id = ?", (record_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
 async def db_record_stats() -> dict:
     """Totals for the panel header and the task filter dropdown."""
     async with aiosqlite.connect(str(DB_PATH)) as db:
@@ -578,19 +653,22 @@ async def db_record_stats() -> dict:
     by_action: dict[str, int] = {}
     total = 0
     failed = 0
+    skipped = 0
     total_bytes = 0
     for r in rows:
         total += r["n"]
         total_bytes += r["b"]
         if r["status"] == "failed":
             failed += r["n"]
+        elif r["status"] == "skipped":
+            skipped += r["n"]
         # by_action counts every row, failures included, so the per-direction
-        # numbers in the panel header add up to the total. "failed" is an extra
-        # dimension on top (a subset, not a fourth bucket).
+        # numbers in the panel header add up to the total. "failed" / "skipped"
+        # are an extra dimension on top (subsets, not extra buckets).
         key = "delete" if r["action"].startswith("delete") else r["action"]
         by_action[key] = by_action.get(key, 0) + r["n"]
-    return {"total": total, "failed": failed, "bytes": total_bytes,
-            "by_action": by_action, "tasks": tasks}
+    return {"total": total, "failed": failed, "skipped": skipped,
+            "bytes": total_bytes, "by_action": by_action, "tasks": tasks}
 
 
 async def db_clear_records():

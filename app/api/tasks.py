@@ -241,6 +241,8 @@ class IgnoreFileRequest(BaseModel):
     # normaliser below turns all three into the same key.
     path: str
     action: str = ""
+    # Size of the file that was skipped, so the record panel can show it.
+    size: int = 0
 
 
 def _task_rel_path(task: dict, raw_path: str) -> str:
@@ -256,6 +258,35 @@ def _task_rel_path(task: dict, raw_path: str) -> str:
     rel = "/" + raw.lstrip("/")
     # Same shape the engine stores: forward slashes, single leading slash.
     return rel.replace("//", "/")
+
+
+def _record_paths(task: dict, rel: str) -> tuple[str, str]:
+    """Build the (local, remote) absolute paths a record row should carry.
+
+    Records mirror what the engine writes: the local side is the path the
+    container sees (/sync/...), the remote side is the cloud path.
+    """
+    local = (task.get("local_path") or "/sync").rstrip("/") + rel
+    remote = (task.get("remote_path") or "").rstrip("/") + rel
+    return local, remote
+
+
+def _rel_from_record(task: dict, rec: dict) -> str:
+    """Recover the task-relative path of a record, or "" if it is gone.
+
+    Upload rows put the local path in ``source`` and downloads put it in
+    ``target``, so both columns have to be tried against both task roots.
+    """
+    bases = [b.rstrip("/") for b in
+             (task.get("local_path"), task.get("remote_path")) if b]
+    for cand in (rec.get("source"), rec.get("target")):
+        cand = (cand or "").strip().replace("\\", "/")
+        if not cand:
+            continue
+        for base in bases:
+            if cand == base or cand.startswith(base + "/"):
+                return "/" + cand[len(base):].lstrip("/")
+    return ""
 
 
 @router.get("/{task_id}/ignored")
@@ -281,7 +312,60 @@ async def ignore_file(task_id: int, req: IgnoreFileRequest):
     await db.db_add_ignored(task_id, rel, req.action or "")
     # A file that is ignored should not carry a stale backoff entry around.
     await db.db_clear_failure(task_id, rel)
+
+    # A skip is a user decision, not a failure, but it must still show up in
+    # the transfer panel: otherwise the file vanishes from every counter with
+    # no trace of why, and there is nowhere to undo it from.
+    action = req.action if req.action in ("upload", "download") else (
+        "download" if task.get("sync_mode") == "download_only" else "upload")
+    local_abs, remote_abs = _record_paths(task, rel)
+    src, dst = (remote_abs, local_abs) if action == "download" \
+        else (local_abs, remote_abs)
+    conn = await db.db_get_connection(task.get("connection_id") or 0)
+    await db.db_add_record(
+        task_id, action,
+        task_name=task.get("name", ""),
+        connection=(conn or {}).get("name", ""),
+        file_name=os.path.basename(rel) or rel,
+        source=src, target=dst,
+        file_size=int(req.size or 0), status="skipped",
+        error="已跳过（手动）",
+    )
     return {"ignored": True, "path": rel}
+
+
+@router.post("/{task_id}/records/{record_id}/retry")
+async def retry_record(task_id: int, record_id: int):
+    """Re-queue one failed or skipped file from the transfer panel.
+
+    Nothing is transferred here: the per-file failure/ignore state is cleared
+    and a sync is spawned, so the file goes through the normal scan — the same
+    path a scheduled run takes. The row itself is left alone; if the file goes
+    through, a fresh success row appears above it.
+    """
+    task = await db.db_get_task(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    rec = await db.db_get_record(record_id)
+    if not rec or int(rec.get("task_id") or 0) != task_id:
+        raise HTTPException(404, "Record not found for this task")
+    if rec.get("status") not in ("failed", "skipped"):
+        raise HTTPException(400, "Only failed or skipped records can be retried")
+
+    rel = _rel_from_record(task, rec)
+    if not rel:
+        raise HTTPException(
+            422, "Cannot work out which file this record refers to "
+                 "(the task's paths may have changed)")
+
+    await db.db_remove_ignored(task_id, rel)
+    await db.db_clear_failure(task_id, rel)
+
+    running = SyncEngine.is_running(task_id)
+    if not running:
+        SyncEngine.spawn(task_id)
+    return {"status": "queued" if running else "syncing",
+            "path": rel, "already_running": running}
 
 
 @router.delete("/{task_id}/ignore-file")
