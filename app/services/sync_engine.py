@@ -66,7 +66,12 @@ class ActiveTransfer:
 @dataclass
 class SyncProgress:
     task_id: int
+    # total_files counts only files that actually need work (upload/download/
+    # delete). Files that are already in sync are reported separately as
+    # noop_files, otherwise the overall progress bar would start at 99% on any
+    # incremental run and the "N/M" label would contradict the percentage.
     total_files: int = 0
+    noop_files: int = 0
     processed_files: int = 0
     failed_files: int = 0
     skipped_files: int = 0
@@ -75,12 +80,28 @@ class SyncProgress:
     speed: float = 0.0
     started_at: float = 0.0
     is_running: bool = False
+    # "scanning" while walking the local tree / listing the cloud,
+    # "executing" once the operation list is known, "done" afterwards.
+    phase: str = "idle"
     # Concurrent transfer tracking: transfer_id -> ActiveTransfer
     active_transfers: dict = field(default_factory=dict)
     _next_transfer_id: int = 0
     # Speed tracking internals
     _speed_last_time: float = 0.0
     _speed_last_bytes: int = 0
+
+    @property
+    def completed_files(self) -> int:
+        """Files whose operation is over (synced + failed + skipped)."""
+        return self.processed_files + self.failed_files + self.skipped_files
+
+    @property
+    def percent(self) -> int:
+        if not self.is_running:
+            return 100
+        if self.total_files <= 0:
+            return 0
+        return min(100, round(self.completed_files / self.total_files * 100))
 
 
 class SyncEngine:
@@ -153,7 +174,8 @@ class SyncEngine:
         cls._running_tasks.add(task_id)
 
         # Initialize progress
-        progress = SyncProgress(task_id=task_id, started_at=time.time(), is_running=True)
+        progress = SyncProgress(task_id=task_id, started_at=time.time(),
+                                is_running=True, phase="scanning")
         cls._progress[task_id] = progress
 
         task = await db.db_get_task(task_id)
@@ -226,26 +248,49 @@ class SyncEngine:
                 local_map, remote_map, last_state, sync_mode, local_base, remote_base
             )
 
-            progress.total_files = len(operations)
-            await db.db_add_log(task_id, "info", detail=f"Found {len(operations)} operations to execute")
+            # Only files that actually need work count towards the progress
+            # bar. "No changes" placeholders are reported separately so the
+            # bar starts at 0% and the N/M label agrees with the percentage.
+            noop_count = sum(1 for op in operations if op.action == SyncAction.SKIP)
+            progress.noop_files = noop_count
+            progress.total_files = len(operations) - noop_count
+            progress.total_bytes = sum(
+                (op.file_info.size or 0) for op in operations
+                if op.file_info is not None
+                and op.action in (SyncAction.UPLOAD, SyncAction.DOWNLOAD))
+            progress.phase = "executing"
+            await db.db_add_log(task_id, "info", detail=(
+                f"Found {progress.total_files} operations to execute "
+                f"({noop_count} unchanged)"))
 
-            # Execute operations with concurrency limit
+            # Execute operations with a concurrency limit. Counters are bumped
+            # per finished operation instead of after asyncio.gather returns:
+            # gather only resolves when *every* operation is done, which used
+            # to leave the overall progress frozen at 0% for the whole run and
+            # then jump straight to 100%.
             semaphore = asyncio.Semaphore(SYNC_CONCURRENCY)
-            results = await asyncio.gather(
-                *[cls._execute_op(op, provider, task_id, semaphore, progress, local_base, remote_base)
-                  for op in operations],
-                return_exceptions=True
-            )
 
-            # Count results
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
+            async def _run_one(op: SyncOperation):
+                try:
+                    result = await cls._execute_op(
+                        op, provider, task_id, semaphore, progress,
+                        local_base, remote_base)
+                except asyncio.CancelledError:
+                    progress.skipped_files += 1
+                    raise
+                except Exception as exc:  # noqa: BLE001 - _execute_op already logged it
                     progress.failed_files += 1
-                    await db.db_add_log(task_id, "error", operations[i].remote_path, str(result))
-                elif result == "success":
+                    return exc
+                if result == "success":
                     progress.processed_files += 1
                 elif result == "skipped":
                     progress.skipped_files += 1
+                return result
+
+            await asyncio.gather(
+                *[_run_one(op) for op in operations],
+                return_exceptions=True
+            )
 
             # Update sync state
             await cls._update_sync_state(task_id, local_map, remote_map, local_base, remote_base)
@@ -298,6 +343,7 @@ class SyncEngine:
 
         finally:
             progress.is_running = False
+            progress.phase = "done"
             cls._running_tasks.discard(task_id)
             cls._stop_requested.discard(task_id)
             cls._cancelled_transfers.pop(task_id, None)

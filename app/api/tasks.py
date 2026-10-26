@@ -14,6 +14,30 @@ from app.config import LOCAL_SYNC_ROOT
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 
+def _progress_payload(progress) -> dict:
+    """Serialize sync progress for the UI.
+
+    `completed_files` / `percent` are computed here so the frontend never has
+    to re-derive them from raw counters (the old wiring displayed
+    "0/83 · 100%" because the label only used processed_files while the
+    percentage also added skipped and failed).
+    """
+    return {
+        "phase": progress.phase,
+        "total_files": progress.total_files,
+        "noop_files": progress.noop_files,
+        "completed_files": progress.completed_files,
+        "percent": progress.percent,
+        "processed_files": progress.processed_files,
+        "failed_files": progress.failed_files,
+        "skipped_files": progress.skipped_files,
+        "total_bytes": progress.total_bytes,
+        "transferred_bytes": progress.transferred_bytes,
+        "speed": progress.speed,
+        "active_transfers": _transfers_with_speed(progress),
+    }
+
+
 def _transfers_with_speed(progress) -> list:
     """Build active_transfers list, computing per-file speed on the server.
 
@@ -92,15 +116,7 @@ async def list_tasks():
         progress = SyncEngine.get_progress(task["id"])
         task["is_running"] = SyncEngine.is_running(task["id"])
         if progress:
-            task["progress"] = {
-                "total_files": progress.total_files,
-                "processed_files": progress.processed_files,
-                "failed_files": progress.failed_files,
-                "skipped_files": progress.skipped_files,
-                "transferred_bytes": progress.transferred_bytes,
-                "speed": progress.speed,
-                "active_transfers": _transfers_with_speed(progress),
-            }
+            task["progress"] = _progress_payload(progress)
         result.append(task)
     return {"tasks": result}
 
@@ -113,15 +129,7 @@ async def get_task(task_id: int):
     task["is_running"] = SyncEngine.is_running(task_id)
     progress = SyncEngine.get_progress(task_id)
     if progress:
-        task["progress"] = {
-            "total_files": progress.total_files,
-            "processed_files": progress.processed_files,
-            "failed_files": progress.failed_files,
-            "skipped_files": progress.skipped_files,
-            "transferred_bytes": progress.transferred_bytes,
-            "speed": progress.speed,
-            "active_transfers": _transfers_with_speed(progress),
-        }
+        task["progress"] = _progress_payload(progress)
     return task
 
 
@@ -247,7 +255,11 @@ async def get_progress(task_id: int):
         return {"is_running": False}
     return {
         "is_running": progress.is_running,
+        "phase": progress.phase,
         "total_files": progress.total_files,
+        "noop_files": progress.noop_files,
+        "completed_files": progress.completed_files,
+        "percent": progress.percent,
         "processed_files": progress.processed_files,
         "failed_files": progress.failed_files,
         "skipped_files": progress.skipped_files,

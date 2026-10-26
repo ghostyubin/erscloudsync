@@ -208,8 +208,18 @@ const App = {
         const processedFiles = p.processed_files || 0;
         const failedFiles = p.failed_files || 0;
         const skippedFiles = p.skipped_files || 0;
-        const overallPct = totalFiles > 0
-            ? Math.round((processedFiles + skippedFiles + failedFiles) / totalFiles * 100) : 0;
+        const noopFiles = p.noop_files || 0;
+        // Completed = synced + failed + skipped. The backend sends this (and
+        // the percentage) directly; deriving it here from processed_files
+        // alone is what produced "0/83 · 100%".
+        const completedFiles = (p.completed_files !== undefined && p.completed_files !== null)
+            ? p.completed_files
+            : (processedFiles + skippedFiles + failedFiles);
+        const overallPct = (p.percent !== undefined && p.percent !== null)
+            ? p.percent
+            : (totalFiles > 0
+                ? Math.min(100, Math.round(completedFiles / totalFiles * 100)) : 0);
+        const phase = p.phase || '';
 
         // Active transfers
         const transfers = p.active_transfers || [];
@@ -263,7 +273,7 @@ const App = {
                 if (!activeIds.has(k)) delete this._prevTransfers[k];
             }
         } else if (isActive) {
-            transfersHtml = `<div class="empty-hint">扫描文件中...</div>`;
+            transfersHtml = `<div class="empty-hint">${phase === 'scanning' ? '扫描文件中...' : '处理中...'}</div>`;
         } else if (task.status === 'error') {
             transfersHtml = `<div class="empty-hint" style="color:var(--color-error)">
                 ${task.last_error ? this.escape(task.last_error) : '同步出错'}</div>`;
@@ -271,17 +281,29 @@ const App = {
             transfersHtml = `<div class="empty-hint">无任务</div>`;
         }
 
-        // Overall progress (only when running)
+        // Overall progress footer
         let progressFooter = '';
         if (isActive) {
+            let label;
+            if (totalFiles > 0) {
+                label = `${completedFiles}/${totalFiles} · ${overallPct}%`;
+                if (noopFiles > 0) label += ` · 无变化 ${noopFiles}`;
+                if (failedFiles > 0) label += ` · 失败 ${failedFiles}`;
+            } else if (phase === 'scanning') {
+                label = '扫描文件中…';
+            } else if (noopFiles > 0) {
+                label = `${noopFiles} 个文件无变化`;
+            } else {
+                label = '检查中…';
+            }
             progressFooter = `
                 <div class="overall-progress">
                     <div class="overall-progress-bar">
                         <div class="overall-progress-fill" style="width:${overallPct}%"></div>
                     </div>
-                    <span class="overall-progress-text">${processedFiles}/${totalFiles} · ${overallPct}%</span>
+                    <span class="overall-progress-text">${label}</span>
                 </div>`;
-        } else if (totalFiles > 0) {
+        } else if (task.status !== 'error' && task.last_sync_at) {
             progressFooter = `
                 <div class="overall-progress">
                     <div class="overall-progress-bar">
@@ -728,7 +750,10 @@ const App = {
             const st = statusMap[t.status] || statusMap.idle;
             let progressInfo = '';
             if (t.is_running && t.progress) {
-                progressInfo = `<span>📊 ${t.progress.processed_files}/${t.progress.total_files} 文件</span>`;
+                const done = t.progress.completed_files !== undefined
+                    ? t.progress.completed_files
+                    : ((t.progress.processed_files || 0) + (t.progress.skipped_files || 0) + (t.progress.failed_files || 0));
+                progressInfo = `<span>📊 ${done}/${t.progress.total_files || 0} 文件</span>`;
             }
             return `
                 <div class="task-item">
