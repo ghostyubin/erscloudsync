@@ -412,6 +412,18 @@ async def db_get_sync_state(task_id: int) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+async def db_get_sync_state_entry(task_id: int, file_path: str) -> Optional[dict]:
+    """The stored "this file was successfully transferred" row, if any."""
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM sync_state WHERE task_id = ? AND file_path = ?",
+            (task_id, file_path),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
 async def db_upsert_sync_state(task_id: int, file_path: str, file_size: int,
                                 file_mtime: float, file_md5: str = "", side: str = "both"):
     async with aiosqlite.connect(str(DB_PATH)) as db:

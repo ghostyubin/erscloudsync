@@ -289,6 +289,45 @@ def _rel_from_record(task: dict, rec: dict) -> str:
     return ""
 
 
+async def _resolve_if_synced(task: dict, rel: str, action: str) -> bool:
+    """Resolve a failed/skipped record as success when the file is already
+    on the cloud and unchanged locally, instead of scheduling a sync that
+    would decide "No changes" and write nothing — which left the row sitting
+    there with a Retry button forever.
+
+    The check is offline on purpose: a sync_state row exists only after a
+    completed transfer, so state + unchanged local mtime/size means the file
+    went through. If the cloud copy was deleted meanwhile, the next scan
+    re-uploads it strictly (sync_state is not trusted for existence), so we
+    are not hiding anything.
+    """
+    st = await db.db_get_sync_state_entry(task["id"], rel)
+    if not st:
+        return False
+    local_path = (task.get("local_path") or "/sync").rstrip("/") + rel
+    try:
+        stat = os.stat(local_path)
+    except OSError:
+        return False
+    if st.get("file_size") != stat.st_size or \
+            abs((st.get("file_mtime") or 0) - stat.st_mtime) > 2:
+        return False
+
+    local_abs, remote_abs = _record_paths(task, rel)
+    src, dst = (remote_abs, local_abs) if action == "download" \
+        else (local_abs, remote_abs)
+    conn = await db.db_get_connection(task.get("connection_id") or 0)
+    await db.db_add_record(
+        task["id"], action,
+        task_name=task.get("name", ""),
+        connection=(conn or {}).get("name", ""),
+        file_name=os.path.basename(rel) or rel,
+        source=src, target=dst,
+        file_size=stat.st_size, status="success",
+    )
+    return True
+
+
 @router.get("/{task_id}/ignored")
 async def list_ignored(task_id: int):
     """Files the user skipped — they are no longer queued for transfer."""
@@ -360,6 +399,14 @@ async def retry_record(task_id: int, record_id: int):
 
     await db.db_remove_ignored(task_id, rel)
     await db.db_clear_failure(task_id, rel)
+
+    # Fast path: the file is already on the cloud and unchanged since — a
+    # sync cycle would decide "No changes" and write nothing, leaving this
+    # row (and its Retry button) around forever. Record it as success now.
+    if rec.get("action") in ("upload", "download") and \
+            await _resolve_if_synced(task, rel, rec["action"]):
+        return {"status": "already_synced", "path": rel,
+                "already_running": False}
 
     # request_sync, not spawn: a bare spawn is a no-op while a cycle is
     # running, and that cycle's operation list was computed before this

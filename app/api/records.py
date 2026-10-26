@@ -10,7 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 
 from app import database as db
-from app.api.tasks import _rel_from_record
+from app.api.tasks import _rel_from_record, _resolve_if_synced
 from app.services.sync_engine import SyncEngine
 
 router = APIRouter(prefix="/api/records", tags=["records"])
@@ -97,6 +97,7 @@ async def retry_all():
 
     touched: dict[int, dict] = {}
     resolved = 0
+    resolved_in_place = 0
     for rec in records:
         task = touched.get(rec["task_id"])
         if task is None:
@@ -111,18 +112,27 @@ async def retry_all():
             continue
         await db.db_remove_ignored(rec["task_id"], rel)
         await db.db_clear_failure(rec["task_id"], rel)
-        resolved += 1
+
+        # Files that already reached the cloud and did not change since get
+        # closed out as success right here — scheduling a sync for them would
+        # be a no-op and the rows would linger with a Retry button.
+        if rec.get("action") in ("upload", "download") and \
+                await _resolve_if_synced(task, rel, rec["action"]):
+            resolved_in_place += 1
+        else:
+            resolved += 1
 
     started = []
     follow_up = []
     for task_id, task in touched.items():
-        if SyncEngine.request_sync(task_id) == "started":
+        if resolved and SyncEngine.request_sync(task_id) == "started":
             started.append(task.get("name") or f"#{task_id}")
-        else:
+        elif resolved:
             follow_up.append(task.get("name") or f"#{task_id}")
 
-    logger.info("Retry-all: %d record(s) re-queued across %d task(s)",
-                resolved, len(touched))
+    logger.info("Retry-all: %d record(s) re-queued, %d resolved in place",
+                resolved, resolved_in_place)
     return {"queued": resolved, "records": len(records),
+            "resolved": resolved_in_place,
             "tasks": list(touched.keys()),
             "started": started, "already_running": follow_up}

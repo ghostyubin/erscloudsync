@@ -1017,7 +1017,9 @@ const App = {
         try {
             const res = await this.api('POST',
                 `/api/tasks/${taskId}/records/${recordId}/retry`);
-            if (res && res.already_running) {
+            if (res && res.status === 'already_synced') {
+                this.toast('文件已在云端且未变动，已标记为成功', 'success');
+            } else if (res && res.already_running) {
                 this.toast('已清除状态，当前轮同步结束后自动补跑一轮', 'success');
             } else {
                 this.toast('已重新排队，正在同步', 'success');
@@ -1062,13 +1064,18 @@ const App = {
         if (btn) { btn.disabled = true; btn.textContent = '重试中'; }
         try {
             const res = await this.api('POST', '/api/records/retry-all');
-            if (!res || !res.queued) {
+            if (!res || (!res.queued && !res.resolved)) {
                 this.toast('没有需要重试的记录', 'info');
             } else {
-                const where = res.already_running && res.already_running.length
-                    ? `当前轮结束后自动补跑（${res.already_running.join('、')}）`
-                    : `已启动任务（${(res.started || []).join('、')}）`;
-                this.toast(`已重新排队 ${res.queued} 条记录，${where}`, 'success');
+                const bits = [];
+                if (res.resolved) bits.push(`${res.resolved} 条已在云端，直接标记成功`);
+                if (res.queued) {
+                    bits.push(`${res.queued} 条重新排队`);
+                    bits.push(res.already_running && res.already_running.length
+                        ? `当前轮结束后自动补跑（${res.already_running.join('、')}）`
+                        : `已启动任务（${(res.started || []).join('、')}）`);
+                }
+                this.toast(bits.join('，'), 'success');
             }
             await this.loadRecords(true);
         } catch (e) {
