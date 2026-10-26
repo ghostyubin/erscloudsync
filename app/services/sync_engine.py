@@ -439,14 +439,18 @@ class SyncEngine:
                           task_id: int, semaphore: asyncio.Semaphore,
                           progress: SyncProgress, local_base: str,
                           remote_base: str) -> str:
-        """Execute a single sync operation."""
+        """Execute a single sync operation.
+
+        Returns "success" / "skipped" (or raises). Progress counters are bumped
+        by the caller from that return value — never here, or every operation
+        would be counted twice (a 29-file cycle used to report 58 skipped).
+        """
         async with semaphore:
             # Check if stop was requested (e.g. user paused the task)
             if task_id in cls._stop_requested:
                 return "skipped"
 
             if op.action == SyncAction.SKIP:
-                progress.skipped_files += 1
                 return "skipped"
 
             try:
@@ -456,7 +460,6 @@ class SyncEngine:
                     except OSError:
                         # The file vanished between the scan and now (moved,
                         # deleted, or a temp file that got cleaned up).
-                        progress.skipped_files += 1
                         await db.db_add_log(task_id, "skip", op.remote_path,
                             "Skipped (file no longer exists)")
                         return "skipped"
@@ -487,7 +490,6 @@ class SyncEngine:
                     try:
                         # Check if this transfer was cancelled before starting
                         if cls.is_transfer_cancelled(task_id, transfer_id):
-                            progress.skipped_files += 1
                             await db.db_add_log(task_id, "skip", op.remote_path,
                                 "Skipped (cancelled by user)")
                             return "skipped"
@@ -546,7 +548,6 @@ class SyncEngine:
                     try:
                         # Check if this transfer was cancelled before starting
                         if cls.is_transfer_cancelled(task_id, transfer_id):
-                            progress.skipped_files += 1
                             await db.db_add_log(task_id, "skip", op.remote_path,
                                 "Skipped (cancelled by user)")
                             return "skipped"
@@ -599,12 +600,10 @@ class SyncEngine:
                 # Transfer was cancelled (by user or by stop request)
                 await db.db_add_log(task_id, "skip", op.remote_path or op.local_path,
                     f"Cancelled: {e}")
-                progress.skipped_files += 1
                 return "skipped"
             except Exception as e:
                 await db.db_add_log(task_id, "error", op.remote_path or op.local_path,
                     f"{op.action.value} failed: {e}")
-                progress.failed_files += 1
                 raise
 
             return "skipped"

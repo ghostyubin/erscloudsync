@@ -1,6 +1,7 @@
 """Task scheduler - manages scheduled and real-time sync tasks."""
 
 import asyncio
+import fnmatch
 import os
 import time
 from typing import Optional
@@ -10,7 +11,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-from app.services.sync_engine import SyncEngine
+from app.services.sync_engine import SyncEngine, DEFAULT_EXCLUDE_PATTERNS
 from app import database as db
 from app.config import LOCAL_SYNC_ROOT, DOWNLOAD_DIR
 import logging
@@ -35,6 +36,12 @@ class FileChangeHandler(FileSystemEventHandler):
     def on_any_event(self, event):
         if event.is_directory:
             return
+        # Ignore the files the sync engine never uploads anyway. Our own
+        # downloads write "<name>.part" before the atomic rename, so without
+        # this a failing download would keep re-triggering itself in a loop.
+        name = os.path.basename(event.src_path or "")
+        if any(fnmatch.fnmatch(name, pat) for pat in DEFAULT_EXCLUDE_PATTERNS):
+            return
         self._last_trigger = time.time()
         # Called from a watchdog observer thread -> hop onto the event loop.
         self._loop.call_soon_threadsafe(self._schedule_debounced_sync)
@@ -54,19 +61,27 @@ class FileChangeHandler(FileSystemEventHandler):
 
     async def _debounced_sync(self):
         try:
-            # Wait until the burst of file events settles down.
-            while time.time() - self._last_trigger < self.debounce_seconds - 1:
-                await asyncio.sleep(1)
-            # A sync may already be running for this task; let it finish so
-            # the changes made meanwhile are picked up by the next cycle
-            # instead of racing with it.
-            while SyncEngine.is_running(self.task_id):
-                await asyncio.sleep(2)
-                # Changes arrived while waiting: restart the settle timer.
+            while True:
+                # Wait until the burst of file events settles down.
                 while time.time() - self._last_trigger < self.debounce_seconds - 1:
                     await asyncio.sleep(1)
-            logger.info(f"File change detected, triggering sync for task {self.task_id}")
-            await SyncEngine.sync_task(self.task_id)
+                # A sync may already be running for this task; let it finish so
+                # the changes made meanwhile are picked up by the next cycle
+                # instead of racing with it.
+                while SyncEngine.is_running(self.task_id):
+                    await asyncio.sleep(2)
+                    # Changes arrived while waiting: restart the settle timer.
+                    while time.time() - self._last_trigger < self.debounce_seconds - 1:
+                        await asyncio.sleep(1)
+                started = time.time()
+                logger.info(f"File change detected, triggering sync for task {self.task_id}")
+                await SyncEngine.sync_task(self.task_id)
+                # Events that arrive while the sync runs are not queued
+                # anywhere (_schedule_debounced_sync returns early because this
+                # task is still alive). If the copy was still writing during
+                # the cycle, run once more so those files are not missed.
+                if self._last_trigger <= started:
+                    return
         except asyncio.CancelledError:
             raise
         except Exception as e:
