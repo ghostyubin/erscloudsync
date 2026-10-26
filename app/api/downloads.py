@@ -14,6 +14,7 @@ from typing import Optional
 
 from app import database as db
 from app.config import DOWNLOAD_DIR
+from app.services.traffic import traffic
 from app.utils.helpers import get_provider
 
 router = APIRouter(prefix="/api/downloads", tags=["downloads"])
@@ -165,6 +166,9 @@ async def _execute_download(dl_id: int, conn: dict, remote_path: str,
                 dl_id, status="failed", error_message=str(e), completed_at=time.time()
             )
     finally:
+        # Safety net: a stale in-flight entry would add a constant to the
+        # dashboard's download rate for the rest of the process lifetime.
+        traffic.clear_live(f"dl:{dl_id}")
         _running.discard(dl_id)
         _progress.pop(dl_id, None)
         await provider.close()
@@ -205,13 +209,20 @@ async def _download_single(dl_id: int, provider, remote_path: str, local_path: s
             await db.db_update_download(
                 dl_id, downloaded_bytes=transferred, file_size=file_size
             )
+        # Feed the dashboard's global download rate. The db write above is
+        # throttled, this is not, so the speed stays smooth.
+        traffic.set_live(f"dl:{dl_id}", transferred)
 
     os.makedirs(os.path.dirname(local_path), exist_ok=True)
-    await provider.download_file(remote_path, local_path, progress_cb)
+    try:
+        await provider.download_file(remote_path, local_path, progress_cb)
+    finally:
+        traffic.clear_live(f"dl:{dl_id}")
 
     _progress[dl_id]["transferred"] = total_size
     _progress[dl_id]["processed_files"] = 1
     _progress[dl_id]["speed"] = 0
+    traffic.add("download", total_size)
     await db.db_update_download(
         dl_id,
         downloaded_bytes=total_size,
@@ -270,10 +281,12 @@ async def _download_folder(dl_id: int, provider, remote_path: str, local_path: s
                 speed = (transferred - last_bytes) / dt
                 _progress[dl_id]["transferred"] = transferred + transferred_bytes
                 _progress[dl_id]["speed"] = speed
+            traffic.set_live(f"dl:{dl_id}", transferred + transferred_bytes)
 
         await provider.download_file(f.path, f_local, progress_cb)
         transferred += f.size
         processed += 1
+        traffic.add("download", f.size)
         _progress[dl_id]["processed_files"] = processed
         _progress[dl_id]["transferred"] = transferred
 
@@ -291,6 +304,7 @@ async def _download_folder(dl_id: int, provider, remote_path: str, local_path: s
             )
 
     _progress[dl_id]["speed"] = 0
+    traffic.clear_live(f"dl:{dl_id}")
     await db.db_update_download(
         dl_id,
         downloaded_bytes=transferred,

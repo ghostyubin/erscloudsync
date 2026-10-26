@@ -4,6 +4,7 @@ import os
 import shutil
 from fastapi import APIRouter, HTTPException
 from app.config import LOCAL_SYNC_ROOT, LOCAL_ROOTS, DOWNLOAD_DIR, DATA_DIR
+from app.services.traffic import traffic
 from app.version import APP_VERSION
 
 router = APIRouter(prefix="/api/system", tags=["system"])
@@ -12,6 +13,23 @@ router = APIRouter(prefix="/api/system", tags=["system"])
 @router.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@router.get("/traffic")
+async def traffic_stats():
+    """Cumulative upload/download bytes plus the current throughput.
+
+    Reads are cheap and intended to be polled about once a second: the live
+    speed is sampled from the sync engine's in-flight counters on each call.
+    """
+    return await traffic.snapshot()
+
+
+@router.post("/traffic/reset")
+async def traffic_reset():
+    """Zero the cumulative counters (the live speed keeps working)."""
+    await traffic.reset()
+    return await traffic.snapshot()
 
 
 @router.get("/info")

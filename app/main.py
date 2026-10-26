@@ -77,12 +77,25 @@ async def lifespan(app: FastAPI):
     logger.info("Starting scheduler...")
     await scheduler.start()
 
+    # Cumulative traffic counters live in the settings table; load them before
+    # the first dashboard poll so the numbers do not start at zero.
+    try:
+        from app.services.traffic import traffic
+        await traffic.load()
+    except Exception as e:  # noqa: BLE001 - never block startup on accounting
+        logger.warning(f"Could not load traffic counters: {e}")
+
     logger.info(f"BauduSync ready at http://{WEB_HOST}:{WEB_PORT}")
     yield
 
     # Shutdown
     logger.info("Shutting down scheduler...")
     await scheduler.stop()
+    try:
+        from app.services.traffic import traffic
+        await traffic.flush()
+    except Exception:  # noqa: BLE001
+        pass
     logger.info("BauduSync stopped.")
 
 

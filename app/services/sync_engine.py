@@ -18,6 +18,7 @@ from app.providers.base import CloudProvider, FileInfo
 from app import database as db
 from app.config import LOCAL_SYNC_ROOT, DOWNLOAD_DIR, SYNC_CONCURRENCY
 from app.services.retry import retry_async
+from app.services.traffic import traffic
 from app.utils.helpers import get_provider
 
 # Filenames that are never worth syncing, regardless of what the task filters
@@ -77,6 +78,11 @@ class SyncProgress:
     skipped_files: int = 0
     total_bytes: int = 0
     transferred_bytes: int = 0
+    # Same bytes split by direction, so the dashboard can show an upload and a
+    # download rate independently. ``transferred_bytes`` stays the sum of the
+    # two and is what the progress bar / history use.
+    transferred_upload: int = 0
+    transferred_download: int = 0
     speed: float = 0.0
     started_at: float = 0.0
     is_running: bool = False
@@ -139,6 +145,26 @@ class SyncEngine:
     @classmethod
     def is_running(cls, task_id: int) -> bool:
         return task_id in cls._running_tasks
+
+    @classmethod
+    def live_transferred(cls) -> tuple[int, int]:
+        """Bytes sent / received so far by all running tasks, retries excluded.
+
+        Includes in-flight transfers so the aggregate speed moves smoothly
+        instead of jumping by a whole file each time one completes.
+        """
+        upload = download = 0
+        for progress in cls._progress.values():
+            if not progress.is_running:
+                continue
+            upload += progress.transferred_upload
+            download += progress.transferred_download
+            for transfer in progress.active_transfers.values():
+                if transfer.action == "upload":
+                    upload += transfer.transferred
+                else:
+                    download += transfer.transferred
+        return upload, download
 
     @classmethod
     def request_stop(cls, task_id: int):
@@ -582,7 +608,12 @@ class SyncEngine:
                             what=f"upload {os.path.basename(op.local_path)}",
                             on_retry=_reset_progress,
                         )
+                        # Pop before counting: the live per-direction totals
+                        # must never hold the same bytes twice in one sample.
+                        progress.active_transfers.pop(transfer_id, None)
                         progress.transferred_bytes += file_size
+                        progress.transferred_upload += file_size
+                        traffic.add("upload", file_size)
                         await db.db_add_log(task_id, "upload", op.remote_path,
                             f"Uploaded {op.local_path}")
                         # Record state right away: the maps used at the end of
@@ -636,7 +667,11 @@ class SyncEngine:
                             what=f"download {os.path.basename(op.remote_path)}",
                             on_retry=_reset_progress,
                         )
-                        progress.transferred_bytes += os.path.getsize(op.local_path)
+                        done_size = os.path.getsize(op.local_path)
+                        progress.active_transfers.pop(transfer_id, None)
+                        progress.transferred_bytes += done_size
+                        progress.transferred_download += done_size
+                        traffic.add("download", done_size)
                         await db.db_add_log(task_id, "download", op.remote_path,
                             f"Downloaded to {op.local_path}")
                         # Same reasoning as the upload path: persist the state

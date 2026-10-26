@@ -79,41 +79,36 @@
             </div>
             <div class="stats-grid" id="stats-grid">
                 <div class="stat-card">
-                    <div class="stat-icon stat-icon-sync">
-                        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M16 17.01V10h-2v7.01h-3L15 21l4-3.99h-3zM9 3L5 6.99h3V14h2V6.99h3L9 3z"/></svg>
-                    </div>
-                    <div>
-                        <div class="stat-label">同步任务</div>
-                        <div class="stat-num stat-num-default" id="stat-tasks">0</div>
-                    </div>
-                </div>
-                <div class="stat-card">
                     <div class="stat-icon stat-icon-up">
                         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/></svg>
                     </div>
-                    <div>
-                        <div class="stat-label">上传中</div>
-                        <div class="stat-num stat-num-up" id="stat-uploading">0</div>
+                    <div class="stat-body">
+                        <div class="stat-label">上传速度</div>
+                        <div class="stat-num stat-num-up" id="stat-up-speed"><span class="stat-val">0</span><span class="stat-unit">B/s</span></div>
                     </div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-icon stat-icon-down">
                         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
                     </div>
-                    <div>
-                        <div class="stat-label">下载中</div>
-                        <div class="stat-num stat-num-down" id="stat-downloading">0</div>
+                    <div class="stat-body">
+                        <div class="stat-label">下载速度</div>
+                        <div class="stat-num stat-num-down" id="stat-down-speed"><span class="stat-val">0</span><span class="stat-unit">B/s</span></div>
                     </div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-icon stat-icon-error">
-                        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 2C6.47 2 2 6.47 2 12s4.47 10 10 10 10-4.47 10-10S17.53 2 12 2zm5 13.59L15.59 17 12 13.41 8.41 17 7 15.59 10.59 12 7 8.41 8.41 7 12 10.59 15.59 7 17 8.41 13.41 12 17 15.59z"/></svg>
+                    <div class="stat-icon stat-icon-sync">
+                        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
                     </div>
-                    <div>
-                        <div class="stat-label">错误</div>
-                        <div class="stat-num stat-num-error" id="stat-errors">0</div>
+                    <div class="stat-body">
+                        <div class="stat-label" id="stat-traffic-label" title="累计上传 + 下载流量">累计流量</div>
+                        <div class="stat-num stat-num-default" id="stat-traffic"><span class="stat-val">0</span><span class="stat-unit">B</span></div>
                     </div>
                 </div>
+                <button type="button" class="stat-action" id="stat-traffic-reset" title="清空流量统计" onclick="app.clearTrafficStats()">
+                    <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                    <span>清空</span>
+                </button>
             </div>
             <div class="content-area">
                 <div id="sync-cards"></div>

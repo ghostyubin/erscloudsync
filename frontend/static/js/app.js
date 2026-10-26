@@ -152,16 +152,6 @@ const App = {
     async loadDashboard() {
         await this.loadTasks();
         const tasks = this.tasks;
-        const errors = tasks.filter(t => t.status === 'error').length;
-        const uploading = tasks.filter(t => t.is_running && t.progress &&
-            t.progress.active_transfers && t.progress.active_transfers.some(tr => tr.action === 'upload')).length;
-        const downloading = tasks.filter(t => t.is_running && t.progress &&
-            t.progress.active_transfers && t.progress.active_transfers.some(tr => tr.action === 'download')).length;
-
-        document.getElementById('stat-tasks').textContent = tasks.length;
-        document.getElementById('stat-uploading').textContent = uploading;
-        document.getElementById('stat-downloading').textContent = downloading;
-        document.getElementById('stat-errors').textContent = errors;
 
         // Render sync cards
         const container = document.getElementById('sync-cards');
@@ -179,16 +169,63 @@ const App = {
             container.innerHTML = tasks.map(t => this.renderSyncCard(t)).join('');
         }
 
-        // Load system info for storage bar + build version
-        try {
-            const info = await this.api('GET', '/api/system/info');
+        // Disk usage + build version + the traffic strip. All cheap, and firing
+        // them together keeps the 1s poll at a single round trip.
+        const [infoRes] = await Promise.allSettled([
+            this.api('GET', '/api/system/info'),
+            this.refreshTraffic(),
+        ]);
+        if (infoRes.status === 'fulfilled') {
+            const info = infoRes.value;
             const disk = info.disk;
             document.getElementById('disk-usage-text').textContent =
                 `${this.formatSize(disk.used)} / ${this.formatSize(disk.total)}`;
             document.getElementById('disk-bar-fill').style.width = disk.usage_percent + '%';
             const verEl = document.getElementById('sidebar-version');
             if (verEl && info.version) verEl.textContent = info.version;
-        } catch (e) {}
+        }
+    },
+
+    // ---- Traffic strip (real-time speeds + cumulative usage) ----
+    /** Split "12.3 MB/s" into value and unit so they can be styled apart. */
+    _splitUnit(text) {
+        const i = String(text).lastIndexOf(' ');
+        return i < 0 ? [String(text), ''] : [text.slice(0, i), text.slice(i + 1)];
+    },
+
+    _renderMetric(id, text) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const [val, unit] = this._splitUnit(text);
+        el.innerHTML = `<span class="stat-val">${this.escape(val)}</span>` +
+            (unit ? `<span class="stat-unit">${this.escape(unit)}</span>` : '');
+    },
+
+    async refreshTraffic() {
+        try {
+            const t = await this.api('GET', '/api/system/traffic');
+            this._renderMetric('stat-up-speed', this.formatSpeed(t.upload_speed || 0));
+            this._renderMetric('stat-down-speed', this.formatSpeed(t.download_speed || 0));
+            this._renderMetric('stat-traffic', this.formatSize(t.total || 0));
+            const label = document.getElementById('stat-traffic-label');
+            if (label) {
+                label.title = `上传 ${this.formatSize(t.upload_total || 0)} / `
+                    + `下载 ${this.formatSize(t.download_total || 0)}`;
+            }
+        } catch (e) {
+            // The strip is informational — never let it break the dashboard.
+        }
+    },
+
+    async clearTrafficStats() {
+        if (!confirm('清空累计流量统计？实时速度显示不受影响。')) return;
+        try {
+            await this.api('POST', '/api/system/traffic/reset');
+            await this.refreshTraffic();
+            this.toast('流量统计已清空', 'success');
+        } catch (e) {
+            this.toast('清空失败: ' + e.message, 'error');
+        }
     },
 
     renderSyncCard(task) {
