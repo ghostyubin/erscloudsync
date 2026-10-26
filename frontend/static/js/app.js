@@ -213,10 +213,13 @@ const App = {
         const noopFiles = p.noop_files || 0;
         // Completed = synced + failed + skipped. The backend sends this (and
         // the percentage) directly; deriving it here from processed_files
-        // alone is what produced "0/83 · 100%".
-        const completedFiles = (p.completed_files !== undefined && p.completed_files !== null)
+        // alone is what produced "0/83 · 100%". Clamp it to the denominator so
+        // a stale/legacy payload can never render "63/9".
+        const rawCompleted = (p.completed_files !== undefined && p.completed_files !== null)
             ? p.completed_files
             : (processedFiles + skippedFiles + failedFiles);
+        const completedFiles = totalFiles > 0
+            ? Math.min(rawCompleted, totalFiles) : rawCompleted;
         const overallPct = (p.percent !== undefined && p.percent !== null)
             ? p.percent
             : (totalFiles > 0

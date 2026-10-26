@@ -249,19 +249,15 @@ class SyncEngine:
             )
 
             # Only files that actually need work count towards the progress
-            # bar. "No changes" placeholders are reported separately so the
-            # bar starts at 0% and the N/M label agrees with the percentage.
-            noop_count = sum(1 for op in operations if op.action == SyncAction.SKIP)
-            progress.noop_files = noop_count
-            progress.total_files = len(operations) - noop_count
-            progress.total_bytes = sum(
-                (op.file_info.size or 0) for op in operations
-                if op.file_info is not None
-                and op.action in (SyncAction.UPLOAD, SyncAction.DOWNLOAD))
+            # bar. "No changes" placeholders are reported separately as
+            # noop_files and are NOT executed: running them would bump
+            # skipped_files for every unchanged file, which is how the label
+            # ended up reading "63/9 · 100% · 无变化 83".
+            work_ops = cls._plan_operations(operations, progress)
             progress.phase = "executing"
             await db.db_add_log(task_id, "info", detail=(
                 f"Found {progress.total_files} operations to execute "
-                f"({noop_count} unchanged)"))
+                f"({progress.noop_files} unchanged)"))
 
             # Execute operations with a concurrency limit. Counters are bumped
             # per finished operation instead of after asyncio.gather returns:
@@ -288,7 +284,7 @@ class SyncEngine:
                 return result
 
             await asyncio.gather(
-                *[_run_one(op) for op in operations],
+                *[_run_one(op) for op in work_ops],
                 return_exceptions=True
             )
 
@@ -314,12 +310,15 @@ class SyncEngine:
                 end_time=time.time(),
                 files_synced=progress.processed_files,
                 files_failed=progress.failed_files,
-                files_skipped=progress.skipped_files,
+                # "skipped" for the history keeps its old meaning: everything
+                # that was not transferred, unchanged files included.
+                files_skipped=progress.skipped_files + progress.noop_files,
                 bytes_transferred=progress.transferred_bytes
             )
             await db.db_add_log(task_id, "info", detail=
                 f"Sync completed: {progress.processed_files} synced, "
-                f"{progress.failed_files} failed, {progress.skipped_files} skipped"
+                f"{progress.failed_files} failed, {progress.skipped_files} skipped, "
+                f"{progress.noop_files} unchanged"
             )
 
         except Exception as e:
@@ -336,7 +335,7 @@ class SyncEngine:
                 error_message=error_msg,
                 files_synced=progress.processed_files,
                 files_failed=progress.failed_files,
-                files_skipped=progress.skipped_files,
+                files_skipped=progress.skipped_files + progress.noop_files,
                 bytes_transferred=progress.transferred_bytes
             )
             await db.db_add_log(task_id, "error", detail=f"Sync error: {error_msg}")
@@ -352,6 +351,27 @@ class SyncEngine:
                 await provider.close()
             except Exception:
                 pass
+
+    @classmethod
+    def _plan_operations(cls, operations: list[SyncOperation],
+                         progress: SyncProgress) -> list[SyncOperation]:
+        """Split the operation list into real work and "no changes" placeholders.
+
+        Fills ``total_files`` / ``noop_files`` / ``total_bytes`` on ``progress``
+        and returns only the operations that need to be executed.
+
+        Anything that is not executed must stay out of ``total_files`` *and*
+        out of the per-op counters, otherwise ``completed_files`` outgrows the
+        denominator and the UI shows nonsense like "63/9 · 100%".
+        """
+        work_ops = [op for op in operations if op.action != SyncAction.SKIP]
+        progress.total_files = len(work_ops)
+        progress.noop_files = len(operations) - len(work_ops)
+        progress.total_bytes = sum(
+            (op.file_info.size or 0) for op in work_ops
+            if op.file_info is not None
+            and op.action in (SyncAction.UPLOAD, SyncAction.DOWNLOAD))
+        return work_ops
 
     @classmethod
     def _compute_operations(cls, local_map: dict, remote_map: dict,
