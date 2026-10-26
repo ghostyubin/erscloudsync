@@ -10,7 +10,7 @@ version: "3.8"
 
 services:
   baudusync:
-    image: baudusync:latest
+    image: ghcr.io/ghostyubin/erscloudsync:latest
     build:
       context: .
       dockerfile: Dockerfile
