@@ -250,6 +250,34 @@ body {
   color: var(--text-primary);
 }
 
+/* Title + optional back button (sub-views reached from 全局设置) */
+.page-title-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.btn-back {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all var(--transition);
+}
+
+.btn-back:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .topbar-actions {
   display: flex;
   align-items: center;
@@ -1593,6 +1621,27 @@ body {
   gap: 4px;
 }
 
+/* The status badge shares the `.badge-*` classes with the dark sync-card
+   header, where the text is near-white — on this light card that renders an
+   apparently empty pill. Give the task list its own readable palette.
+   (Since 编辑/删除 moved here this list is the main place to read a task.) */
+.task-item-detail .badge {
+  padding: 1px 7px;
+  font-size: 11px;
+  line-height: 1.7;
+}
+.task-item-detail .badge-up        { background: rgba(249, 115, 22, 0.14); color: #c2410c; }
+.task-item-detail .badge-down      { background: rgba(59, 130, 246, 0.14); color: #1d4ed8; }
+.task-item-detail .badge-both      { background: rgba(168, 85, 247, 0.14); color: #7e22ce; }
+.task-item-detail .badge-realtime  { background: rgba(22, 163, 74, 0.14);  color: #15803d; }
+.task-item-detail .badge-scheduled { background: rgba(217, 119, 6, 0.14);  color: #b45309; }
+.task-item-detail .badge-manual    { background: rgba(107, 114, 128, 0.14); color: #4b5563; }
+.task-item-detail .badge-error     { background: rgba(220, 38, 38, 0.12);  color: #b91c1c; }
+.task-item-detail .badge-state-running { background: rgba(22, 163, 74, 0.14); color: #15803d; }
+.task-item-detail .badge-state-paused  { background: rgba(202, 138, 4, 0.14); color: #a16207; }
+.task-item-detail .badge-state-waiting { background: rgba(100, 116, 139, 0.14); color: #475569; }
+.task-item-detail .badge-state-idle    { background: rgba(100, 116, 139, 0.10); color: #64748b; }
+
 .task-item-actions {
   display: flex;
   gap: 8px;
@@ -2139,10 +2188,10 @@ details[open] summary::before { transform: rotate(90deg); }
   .stat-num { font-size: 18px; }
 
   /* --- Sync card ---
-     The header must stay on ONE row: the task name plus three badges plus four
-     icon buttons do not fit in 336px of content width, so on phones the status
-     dot and badge padding are trimmed and the name is the only element allowed
-     to shrink (ellipsis). If anything else could shrink the row would wrap. */
+     The header must stay on ONE row. With only the pause/resume and manual-sync
+     buttons left there is enough budget for the dot and full-size badges, so
+     the task name is the only element allowed to shrink (ellipsis). If anything
+     else could shrink the row would wrap. */
   .sync-card { border-radius: var(--radius-md); margin-bottom: 12px; }
   .sync-card-hd {
     padding: 9px 10px;
@@ -2153,16 +2202,12 @@ details[open] summary::before { transform: rotate(90deg); }
   .sync-card-hd-info {
     flex-wrap: nowrap;
     flex: 1 1 auto;
-    gap: 5px;
+    gap: 6px;
     overflow: hidden;
   }
-  /* The state badge already carries the state colour, so the plain dot is
-     redundant and only eats horizontal budget. */
-  .sync-card-hd .sync-status-dot { display: none; }
   .sync-card-name { flex: 0 1 auto; min-width: 0; font-size: 13px; }
-  .sync-card-hd .badge { font-size: 10px; padding: 2px 6px; }
-  .sync-card-hd-actions { margin-left: auto; gap: 3px; }
-  .card-icon-btn { width: 28px; height: 28px; }
+  .sync-card-hd-actions { margin-left: auto; gap: 4px; }
+  .card-icon-btn { width: 30px; height: 30px; }
   .sync-card-body { padding: 10px 12px; gap: 8px; }
 
   /* Both paths stay on a single row; the longer one shrinks and ellipsises

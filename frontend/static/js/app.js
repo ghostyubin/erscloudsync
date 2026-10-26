@@ -64,7 +64,9 @@ const App = {
         this.currentView = view;
         this.closeSidebar();
         // Map sub-views to their parent nav item for active highlighting
-        const navMap = { logs: 'settings' };
+        // (任务管理 is reached from 全局设置 → 同步设置, and is now the only
+        // place where a task can be edited or deleted).
+        const navMap = { logs: 'settings', tasks: 'settings' };
         const activeNav = navMap[view] || view;
         document.querySelectorAll('.nav-item').forEach(item => {
             item.classList.toggle('active', item.dataset.view === activeNav);
@@ -368,12 +370,6 @@ const App = {
                         }
                         <button class="card-icon-btn card-icon-btn-sync" title="立即同步" onclick="app.syncNow(${task.id})" ${isActive ? 'disabled' : ''}>
                             <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>
-                        </button>
-                        <button class="card-icon-btn" title="编辑" onclick="app.editTask(${task.id})">
-                            <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
-                        </button>
-                        <button class="card-icon-btn" title="删除" onclick="app.deleteTask(${task.id})">
-                            <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
                         </button>
                     </div>
                 </div>
