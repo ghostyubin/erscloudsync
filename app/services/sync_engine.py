@@ -154,6 +154,22 @@ class SyncEngine:
             # Ensure local directory exists
             os.makedirs(local_base, exist_ok=True)
 
+            # Make sure the remote root exists BEFORE listing it. Without this,
+            # a cloud-side deleted root makes list_all_files come back empty,
+            # and "not in remote_map" then means "upload everything" on every
+            # single run. Baidu also auto-creates the directory on upload, so a
+            # failure here is logged but not fatal.
+            if sync_mode in ("upload_only", "bidirectional"):
+                try:
+                    ok = await provider.create_directory(remote_base)
+                    if not ok:
+                        await db.db_add_log(task_id, "info",
+                            detail=f"Remote dir {remote_base} could not be ensured; "
+                                   f"uploads will create it on demand")
+                except Exception as e:
+                    await db.db_add_log(task_id, "info",
+                        detail=f"Ensure remote dir {remote_base} skipped: {e}")
+
             # Get filters
             include_patterns = [p.strip() for p in task.get("filter_include", "").split(",") if p.strip()]
             exclude_patterns = [p.strip() for p in task.get("filter_exclude", "").split(",") if p.strip()]
@@ -284,9 +300,18 @@ class SyncEngine:
                 local_changed = True  # New file
 
             if remote_file and last:
-                if remote_file.size != last.get("file_size", 0) or \
-                   abs(remote_file.modify_time - last.get("file_mtime", 0)) > 2:
+                if remote_file.size != last.get("file_size", 0):
                     remote_changed = True
+                else:
+                    last_md5 = (last.get("file_md5") or "").strip()
+                    remote_md5 = (getattr(remote_file, "md5", "") or "").strip()
+                    if last_md5 and remote_md5:
+                        # md5 wins over mtime: the cloud stamps the upload time
+                        # on the file, so a freshly uploaded file would always
+                        # look "changed" if we compared timestamps.
+                        remote_changed = remote_md5 != last_md5
+                    elif abs(remote_file.modify_time - last.get("file_mtime", 0)) > 2:
+                        remote_changed = True
             elif remote_file and not last:
                 remote_changed = True  # New file
 
@@ -418,9 +443,14 @@ class SyncEngine:
                     remote_dir = provider.parent_path(op.remote_path)
                     if remote_dir and remote_dir != "/" and remote_dir != remote_base:
                         try:
-                            await provider.create_directory(remote_dir)
-                        except Exception:
-                            pass  # Directory might already exist
+                            ok = await provider.create_directory(remote_dir)
+                            if not ok:
+                                await db.db_add_log(task_id, "info", remote_dir,
+                                    "Remote directory could not be created; "
+                                    "the upload below may fail")
+                        except Exception as e:
+                            await db.db_add_log(task_id, "info", remote_dir,
+                                f"create_directory failed: {e}")
 
                     try:
                         # Check if this transfer was cancelled before starting
@@ -448,6 +478,17 @@ class SyncEngine:
                         progress.transferred_bytes += file_size
                         await db.db_add_log(task_id, "upload", op.remote_path,
                             f"Uploaded {op.local_path}")
+                        # Record state right away: the maps used at the end of
+                        # the cycle are pre-transfer snapshots, so a completed
+                        # upload would otherwise stay unrecorded if the run is
+                        # interrupted or the remote listing lags behind.
+                        try:
+                            st = os.stat(op.local_path)
+                            await db.db_upsert_sync_state(
+                                task_id, cls._rel_path(op.local_path, local_base),
+                                st.st_size, st.st_mtime, "", "local")
+                        except OSError:
+                            pass
                         return "success"
                     finally:
                         progress.active_transfers.pop(transfer_id, None)
@@ -492,6 +533,19 @@ class SyncEngine:
                         progress.transferred_bytes += os.path.getsize(op.local_path)
                         await db.db_add_log(task_id, "download", op.remote_path,
                             f"Downloaded to {op.local_path}")
+                        # Same reasoning as the upload path: persist the state
+                        # immediately and carry the remote md5 over, so the
+                        # next cycle can tell "already downloaded" apart from
+                        # "changed on the cloud" without relying on mtimes.
+                        try:
+                            st = os.stat(op.local_path)
+                            await db.db_upsert_sync_state(
+                                task_id, cls._rel_path(op.local_path, local_base),
+                                st.st_size, st.st_mtime,
+                                (op.file_info.md5 if op.file_info else "") or "",
+                                "both")
+                        except OSError:
+                            pass
                         return "success"
                     finally:
                         progress.active_transfers.pop(transfer_id, None)
@@ -597,17 +651,30 @@ class SyncEngine:
     async def _update_sync_state(cls, task_id: int, local_map: dict,
                                   remote_map: dict, local_base: str,
                                   remote_base: str):
-        """Update the sync state database with current file states."""
-        for rel_path, local_file in local_map.items():
+        """Persist the state of every path seen this cycle.
+
+        Iterating only ``local_map`` used to leave remote-only files
+        unrecorded, which made download_only tasks re-download everything on
+        every run. ``file_size`` / ``file_mtime`` describe the local side
+        (used to detect local edits), ``file_md5`` describes the remote side
+        (used to detect remote edits without trusting server mtimes).
+        """
+        for rel_path in sorted(set(local_map) | set(remote_map)):
+            local_file = local_map.get(rel_path)
             remote_file = remote_map.get(rel_path)
-            file_info = local_file if local_file else remote_file
-            if file_info:
+            remote_md5 = (getattr(remote_file, "md5", "") or "") if remote_file else ""
+            if local_file and remote_file:
                 await db.db_upsert_sync_state(
-                    task_id, rel_path,
-                    file_info.size, file_info.modify_time,
-                    file_info.md5, "both" if (local_file and remote_file) else
-                    ("local" if local_file else "remote")
-                )
+                    task_id, rel_path, local_file.size, local_file.modify_time,
+                    remote_md5, "both")
+            elif local_file:
+                await db.db_upsert_sync_state(
+                    task_id, rel_path, local_file.size, local_file.modify_time,
+                    "", "local")
+            elif remote_file:
+                await db.db_upsert_sync_state(
+                    task_id, rel_path, remote_file.size, remote_file.modify_time,
+                    remote_md5, "remote")
 
     @staticmethod
     def _resolve_local_base(local_path: str) -> str:

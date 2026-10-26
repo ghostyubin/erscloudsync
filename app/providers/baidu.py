@@ -103,13 +103,38 @@ class BaiduProvider(CloudProvider):
         # memory. Without this, every new provider object reloads the stale
         # token from the DB and the refresh is lost.
         self.conn_id: Optional[int] = None
+        # Directories already ensured during this provider's lifetime, so a
+        # task with 500 files in one folder does not issue 500 create calls.
+        self._created_dirs: set[str] = set()
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=300),
+                # Baidu sometimes answers with Content-Encoding: gzip while the
+                # body is not actually gzipped, which makes aiohttp raise
+                # "Can not decode content-encoding: gzip" (seen on /create).
+                # Asking for identity keeps the JSON endpoints plain.
+                headers={"Accept-Encoding": "identity"},
             )
         return self._session
+
+    @staticmethod
+    def _is_dir_missing(exc: BaseException) -> bool:
+        """True when the error means "that remote directory does not exist".
+
+        Baidu reports a missing directory as ``errno -9``. Anything else
+        (network failure, auth error, rate limit) must NOT be treated as
+        "empty directory": doing so makes the sync engine believe every
+        file was deleted remotely and re-upload everything.
+        """
+        msg = str(exc).lower()
+        if "baidu api error -9" in msg:
+            return True
+        for token in ("not exist", "does not exist", "no such file", "不存在"):
+            if token in msg:
+                return True
+        return False
 
     async def close(self):
         if self._session and not self._session.closed:
@@ -293,7 +318,13 @@ class BaiduProvider(CloudProvider):
         return files
 
     async def list_all_files(self, remote_path: str) -> list[FileInfo]:
-        """Recursively list all files under remote_path."""
+        """Recursively list all files under remote_path.
+
+        A missing directory really does mean "nothing here yet", so it is
+        reported as an empty list. Any other failure is raised: silently
+        returning [] on a transient error would make the sync engine think
+        the whole remote tree disappeared and push every local file again.
+        """
         remote_path = self.normalize_path(remote_path)
         result = []
         queue = [remote_path]
@@ -302,8 +333,10 @@ class BaiduProvider(CloudProvider):
             try:
                 entries = await self.list_files(current)
             except Exception as e:
-                # Skip directories we can't read
-                continue
+                if self._is_dir_missing(e):
+                    logger.info("list_all_files: %s does not exist, treated as empty", current)
+                    continue
+                raise
             for entry in entries:
                 if entry.is_dir:
                     queue.append(entry.path)
@@ -644,20 +677,33 @@ class BaiduProvider(CloudProvider):
         return data.get("errno", -1) == 0
 
     async def create_directory(self, remote_path: str) -> bool:
-        """Create a directory on Baidu Pan."""
+        """Create a directory on Baidu Pan.
+
+        Returns True when the directory exists afterwards. The usual failure
+        is "already exists" (errno -8), so we verify with a lookup instead of
+        trusting the error text. Returns False only for a real failure so the
+        caller can decide whether it is safe to upload into it.
+        """
         remote_path = self.normalize_path(remote_path)
+        if remote_path in self._created_dirs:
+            return True
         try:
             await self._api_post("/create", {
                 "method": "create_dir",
                 "path": remote_path,
             })
+            self._created_dirs.add(remote_path)
             return True
-        except RuntimeError as e:
-            if "already exists" in str(e) or "errno" in str(e):
-                # Directory might already exist, check
+        except Exception as e:
+            try:
                 info = await self.get_file_info(remote_path)
-                return info is not None and info.is_dir
-            raise
+                if info is not None and info.is_dir:
+                    self._created_dirs.add(remote_path)
+                    return True
+            except Exception:
+                pass
+            logger.warning("create_directory(%s) failed: %s", remote_path, e)
+            return False
 
     @staticmethod
     def get_oauth_tool_url() -> str:
