@@ -2,11 +2,12 @@
 # Cloud sync for NAS (Baidu Netdisk & 115 Netdisk)
 #
 # Usage:
-#   docker-compose up -d
+#   docker compose up -d --build
 #
-# For OpenWrt / lightweight NAS systems, adjust volumes as needed.
-
-version: "3.8"
+# Only the three volumes and TZ are actually settings. Every BAUDUSYNC_*
+# variable has a default in app/config.py and most are also baked into the image
+# as ENV, so listing them here with the same value adds nothing except a second
+# place to forget when a default changes.
 
 services:
   baudusync:
@@ -19,42 +20,27 @@ services:
     ports:
       - "5566:5566"
     volumes:
-      # Config directory (database, config) - persistent
+      # Config directory (database, logs) - persistent
       - /vol1/1000/docker/baudusync:/config
       # Sync directory - mount your NAS storage here
       - /vol1/1000/sync:/sync
       # Downloads directory - for files downloaded from cloud
       - /vol1/1000/downloads:/downloads
     environment:
-      - BAUDUSYNC_HOST=0.0.0.0
-      - BAUDUSYNC_PORT=5566
-      - BAUDUSYNC_DATA_DIR=/config
-      - BAUDUSYNC_SYNC_ROOT=/sync
-      - BAUDUSYNC_DOWNLOAD_DIR=/downloads
-      # Baidu OAuth (optional - users can also input tokens directly)
-      - BAIDU_APP_KEY=
-      - BAIDU_APP_SECRET=
-      - BAIDU_REDIRECT_URI=oob
-      # Sync settings
-      # CONCURRENCY: how many files sync at the same time
-      - BAUDUSYNC_CONCURRENCY=3
-      # UPLOAD_CONCURRENCY: how many 4MB blocks of ONE file upload in parallel
-      # (1 = old sequential behaviour; 4 is a good default for home broadband)
-      - BAUDUSYNC_UPLOAD_CONCURRENCY=4
-      # MAX_RETRIES: total attempts per operation (1 disables retry)
-      - BAUDUSYNC_MAX_RETRIES=3
-      # RETRY_DELAY: base backoff in seconds; attempt N waits N * delay
-      - BAUDUSYNC_RETRY_DELAY=3
-      # REALTIME_MAX_DELAY: a real-time task normally starts a cycle once the
-      # folder has been quiet for ~4s. Copying a huge folder never goes quiet,
-      # so after this many seconds it starts anyway and the rest is picked up
-      # by the following cycle. 0 = always wait for the copy to finish.
-      - BAUDUSYNC_REALTIME_MAX_DELAY=30
-      # WRITE_GRACE: files modified within the last N seconds are treated as
-      # "still being copied" and skipped, so a half-written file is never
-      # uploaded and then pushed again when it is complete.
-      - BAUDUSYNC_WRITE_GRACE=3
-    # Override command to use port 5566.
-    # --log-level warning quiets uvicorn's access log; the frontend polls every 3s
-    # and would otherwise flood logs with "200 OK" lines.
-    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5566", "--workers", "1", "--log-level", "warning"]
+      # The image runs on UTC; without this every log line and every timestamp
+      # in the UI is 8 hours off on a China-based NAS.
+      - TZ=Asia/Shanghai
+      # The rest already default to exactly these values. Uncomment to change:
+      # - BAUDUSYNC_CONCURRENCY=3          # files synced in parallel
+      # - BAUDUSYNC_UPLOAD_CONCURRENCY=4   # blocks of ONE file uploaded in parallel
+      # - BAUDUSYNC_MAX_RETRIES=3          # attempts per operation (1 = no retry)
+      # - BAUDUSYNC_RETRY_DELAY=3          # base backoff; attempt N waits N * this
+      # - BAUDUSYNC_REALTIME_MAX_DELAY=30  # start a realtime cycle after N quiet-less seconds (0 = wait forever)
+      # - BAUDUSYNC_WRITE_GRACE=3          # skip files modified within the last N seconds
+    # json-file has no size limit by default, so the container log would grow
+    # forever. The app keeps its own rotating file log under /config/log.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

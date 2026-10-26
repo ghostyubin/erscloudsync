@@ -1,13 +1,12 @@
 # BauduSync - docker-compose for remote machines
-# Pulls pre-built multi-arch image from GitHub Container Registry
+# Pulls the pre-built multi-arch image from GitHub Container Registry
 #
 # Usage:
 #   1. docker login ghcr.io -u ghostyubin --token YOUR_GITHUB_TOKEN
-#   2. docker-compose -f docker-compose.test.yml up -d
+#   2. docker compose -f docker-compose.test.yml up -d
 #
-# Update image: docker-compose -f docker-compose.test.yml pull && docker-compose -f docker-compose.test.yml up -d
-
-version: "3.8"
+# Update: docker compose -f docker-compose.test.yml pull && \
+#         docker compose -f docker-compose.test.yml up -d
 
 services:
   baudusync:
@@ -24,12 +23,17 @@ services:
       # 下载目录 - 从网盘下载的文件存放处
       - ./downloads:/downloads
     environment:
-      - BAUDUSYNC_HOST=0.0.0.0
-      - BAUDUSYNC_PORT=5566
-      - BAUDUSYNC_DATA_DIR=/config
-      - BAUDUSYNC_SYNC_ROOT=/sync
-      - BAUDUSYNC_DOWNLOAD_DIR=/downloads
-      - BAUDUSYNC_CONCURRENCY=3
-      - BAUDUSYNC_UPLOAD_CONCURRENCY=4
-      - BAUDUSYNC_MAX_RETRIES=3
-      - BAUDUSYNC_RETRY_DELAY=3
+      # 镜像跑在 UTC，不设这一行所有时间会差 8 小时
+      - TZ=Asia/Shanghai
+      # 其余参数都有默认值，需要时取消注释：
+      # - BAUDUSYNC_CONCURRENCY=3
+      # - BAUDUSYNC_UPLOAD_CONCURRENCY=4
+      # - BAUDUSYNC_MAX_RETRIES=3
+      # - BAUDUSYNC_RETRY_DELAY=3
+      # - BAUDUSYNC_REALTIME_MAX_DELAY=30
+      # - BAUDUSYNC_WRITE_GRACE=3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

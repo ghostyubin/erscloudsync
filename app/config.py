@@ -58,8 +58,12 @@ LOCAL_ROOTS = [str(LOCAL_SYNC_ROOT), str(DOWNLOAD_DIR)]
 # https://github.com/orgs/OpenListTeam/discussions/19
 BAIDU_DEFAULT_APP_KEY = "NqOMXF6XGhGRIGemsQ9nG0Na"
 BAIDU_DEFAULT_APP_SECRET = "SVT6xpMdLcx6v4aCR4wT8BBOTbzFO8LM"
-BAIDU_APP_KEY = os.environ.get("BAIDU_APP_KEY", BAIDU_DEFAULT_APP_KEY)
-BAIDU_APP_SECRET = os.environ.get("BAIDU_APP_SECRET", BAIDU_DEFAULT_APP_SECRET)
+# ``or`` rather than ``get(key, default)``: a compose file that lists
+# ``BAIDU_APP_KEY=`` with an empty value sets the variable to "" and would then
+# shadow the built-in credentials, so every Baidu authorisation would go out
+# with an empty client_id. Empty means "not configured".
+BAIDU_APP_KEY = os.environ.get("BAIDU_APP_KEY") or BAIDU_DEFAULT_APP_KEY
+BAIDU_APP_SECRET = os.environ.get("BAIDU_APP_SECRET") or BAIDU_DEFAULT_APP_SECRET
 # Use oob redirect — Baidu shows the auth code on a page, user copies it manually
 # This avoids depending on any third-party callback server
 BAIDU_OAUTH_TOOL_URL = (
