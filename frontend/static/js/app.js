@@ -220,10 +220,12 @@ const App = {
         }
 
         // Arrow SVG
+        // Sizes live in CSS (.path-arrow svg) so the mobile breakpoint can
+        // shrink them without fighting inline styles.
         const arrowSvg = {
-            upload: `<svg viewBox="0 0 20 12" fill="none" style="width:22px;height:13px"><path d="M1 6H18M18 6L13 1M18 6L13 11" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
-            download: `<svg viewBox="0 0 20 12" fill="none" style="width:22px;height:13px"><path d="M19 6H2M2 6L7 1M2 6L7 11" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
-            both: `<svg viewBox="0 0 24 12" fill="none" style="width:26px;height:13px"><path d="M1 6H22M22 6L17 1M22 6L17 11M1 6L6 1M1 6L6 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+            upload: `<svg class="arrow-1" viewBox="0 0 20 12" fill="none"><path d="M1 6H18M18 6L13 1M18 6L13 11" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+            download: `<svg class="arrow-1" viewBox="0 0 20 12" fill="none"><path d="M19 6H2M2 6L7 1M2 6L7 11" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+            both: `<svg class="arrow-2" viewBox="0 0 24 12" fill="none"><path d="M1 6H22M22 6L17 1M22 6L17 11M1 6L6 1M1 6L6 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`
         };
 
         // Progress info

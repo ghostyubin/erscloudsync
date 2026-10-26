@@ -619,6 +619,9 @@ body {
   align-items: center;
   justify-content: center;
 }
+.path-arrow svg { display: block; }
+.path-arrow .arrow-1 { width: 22px; height: 13px; }
+.path-arrow .arrow-2 { width: 26px; height: 13px; }
 
 .path-arrow-upload   { color: #f97316; }
 .path-arrow-download { color: #4f6ef7; }
@@ -2143,14 +2146,19 @@ details[open] summary::before { transform: rotate(90deg); }
   .sync-card-name { font-size: 13px; }
   .sync-card-body { padding: 10px 12px; gap: 8px; }
 
+  /* Both paths stay on a single row; the longer one shrinks and ellipsises
+     instead of pushing the cloud path onto a second line. */
   .paths-box {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 2px;
-    padding: 6px 10px;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 9px;
   }
-  .path-arrow { display: none; }
-  .path-row { gap: 6px; }
+  .path-row { flex: 0 1 auto; gap: 3px; }
+  .path-text { flex: 0 1 auto; font-size: 11px; }
+  .path-icon { font-size: 12px; }
+  .path-arrow .arrow-1 { width: 16px; height: 10px; }
+  .path-arrow .arrow-2 { width: 19px; height: 10px; }
 
   .transfer-widget { padding: 10px 12px 8px; }
   .transfer-bottom { flex-wrap: wrap; row-gap: 4px; }
