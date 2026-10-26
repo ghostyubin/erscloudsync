@@ -1784,8 +1784,9 @@ const App = {
                         <span>${time}</span>
                         <span class="rec-sep">·</span>
                         <span class="rec-task">${taskName}</span>
-                        ${failed ? `<span class="rec-fail" title="${this.escape(r.error || '')}">失败${(r.retry_count || 0) > 0 ? ` ×${(r.retry_count || 0) + 1}` : ''}</span>` : ''}
-                        ${skipped ? `<span class="rec-skip" title="${this.escape(r.error || '')}">已跳过</span>` : ''}
+                        ${failed ? `<span class="rec-fail" title="${this.escape(r.error || '')}">失败${(r.retry_count || 0) > 0 ? ` ×${(r.retry_count || 0) + 1}` : ''}</span>`
+                                 : (skipped ? `<span class="rec-skip" title="${this.escape(r.error || '')}">已跳过</span>`
+                                            : `<span class="rec-status-ok">成功</span>`)}
                     </div>
                 </div>
                 <div class="rec-actions">

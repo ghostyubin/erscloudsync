@@ -1952,6 +1952,15 @@ body {
   flex-shrink: 0;
 }
 
+/* Every row shows its outcome text (成功/失败/已跳过) next to the task
+   name; success gets green so the three states read apart at a glance.
+   Separate class from the row-level .rec-ok strip to avoid inheritance. */
+.rec-status-ok {
+  color: var(--color-success);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
 .records-more {
   display: block;
   width: 100%;
