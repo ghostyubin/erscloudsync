@@ -36,7 +36,15 @@ services:
       - BAIDU_APP_SECRET=
       - BAIDU_REDIRECT_URI=oob
       # Sync settings
+      # CONCURRENCY: how many files sync at the same time
       - BAUDUSYNC_CONCURRENCY=3
+      # UPLOAD_CONCURRENCY: how many 4MB blocks of ONE file upload in parallel
+      # (1 = old sequential behaviour; 4 is a good default for home broadband)
+      - BAUDUSYNC_UPLOAD_CONCURRENCY=4
+      # MAX_RETRIES: total attempts per operation (1 disables retry)
+      - BAUDUSYNC_MAX_RETRIES=3
+      # RETRY_DELAY: base backoff in seconds; attempt N waits N * delay
+      - BAUDUSYNC_RETRY_DELAY=3
     # Override command to use port 5566.
     # --log-level warning quiets uvicorn's access log; the frontend polls every 3s
     # and would otherwise flood logs with "200 OK" lines.

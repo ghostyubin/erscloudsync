@@ -17,6 +17,7 @@ from typing import Optional, Callable
 from app.providers.base import CloudProvider, FileInfo
 from app import database as db
 from app.config import LOCAL_SYNC_ROOT, DOWNLOAD_DIR, SYNC_CONCURRENCY
+from app.services.retry import retry_async
 from app.utils.helpers import get_provider
 
 
@@ -428,9 +429,21 @@ class SyncEngine:
                                 "Skipped (cancelled by user)")
                             return "skipped"
 
-                        await provider.upload_file(op.local_path, op.remote_path,
-                            progress_callback=cls._make_callback(progress, transfer_id, task_id),
-                            _transfer=transfer)
+                        def _reset_progress(_attempt_no, _exc):
+                            # The retry starts the file from zero, so the
+                            # speed/progress display must not keep bytes
+                            # counted from the failed attempt.
+                            transfer.transferred = 0
+
+                        await retry_async(
+                            lambda: provider.upload_file(
+                                op.local_path, op.remote_path,
+                                progress_callback=cls._make_callback(
+                                    progress, transfer_id, task_id),
+                                _transfer=transfer),
+                            what=f"upload {os.path.basename(op.local_path)}",
+                            on_retry=_reset_progress,
+                        )
                         progress.transferred_bytes += file_size
                         await db.db_add_log(task_id, "upload", op.remote_path,
                             f"Uploaded {op.local_path}")
@@ -464,8 +477,17 @@ class SyncEngine:
                                 "Skipped (cancelled by user)")
                             return "skipped"
 
-                        await provider.download_file(op.remote_path, op.local_path,
-                            progress_callback=cls._make_callback(progress, transfer_id, task_id))
+                        def _reset_progress(_attempt_no, _exc):
+                            transfer.transferred = 0
+
+                        await retry_async(
+                            lambda: provider.download_file(
+                                op.remote_path, op.local_path,
+                                progress_callback=cls._make_callback(
+                                    progress, transfer_id, task_id)),
+                            what=f"download {os.path.basename(op.remote_path)}",
+                            on_retry=_reset_progress,
+                        )
                         progress.transferred_bytes += os.path.getsize(op.local_path)
                         await db.db_add_log(task_id, "download", op.remote_path,
                             f"Downloaded to {op.local_path}")

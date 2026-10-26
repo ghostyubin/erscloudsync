@@ -17,7 +17,16 @@ WEB_PORT = int(os.environ.get("BAUDUSYNC_PORT", "5566"))
 # Sync defaults
 SYNC_CONCURRENCY = int(os.environ.get("BAUDUSYNC_CONCURRENCY", "3"))
 SYNC_CHUNK_SIZE = int(os.environ.get("BAUDUSYNC_CHUNK_SIZE", str(8 * 1024 * 1024)))  # 8MB
+
+# Retry policy for transient network failures.
+# SYNC_MAX_RETRIES = total attempts per operation (1 means "no retry").
+# SYNC_RETRY_DELAY = base delay in seconds; attempt N waits N * base.
 SYNC_MAX_RETRIES = int(os.environ.get("BAUDUSYNC_MAX_RETRIES", "3"))
+SYNC_RETRY_DELAY = float(os.environ.get("BAUDUSYNC_RETRY_DELAY", "3"))
+
+# How many blocks of a single file are uploaded in parallel.
+# 1 restores the old sequential behaviour.
+UPLOAD_CONCURRENCY = int(os.environ.get("BAUDUSYNC_UPLOAD_CONCURRENCY", "4"))
 
 # Local sync root (mounted volume in Docker, fallback to local dir for dev)
 LOCAL_SYNC_ROOT = Path(os.environ.get("BAUDUSYNC_SYNC_ROOT", str(BASE_DIR / "sync")))

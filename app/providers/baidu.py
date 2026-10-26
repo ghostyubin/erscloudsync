@@ -16,7 +16,8 @@ from typing import Optional
 from urllib.parse import urlencode
 
 from app.providers.base import CloudProvider, FileInfo, AuthResult, ProgressReader
-from app.config import BAIDU_APP_KEY, BAIDU_APP_SECRET, BAIDU_REDIRECT_URI, BAIDU_DEFAULT_APP_KEY, BAIDU_DEFAULT_APP_SECRET, BAIDU_OAUTH_TOOL_URL
+from app.config import BAIDU_APP_KEY, BAIDU_APP_SECRET, BAIDU_REDIRECT_URI, BAIDU_DEFAULT_APP_KEY, BAIDU_DEFAULT_APP_SECRET, BAIDU_OAUTH_TOOL_URL, UPLOAD_CONCURRENCY
+from app.services.retry import retry_async
 from app import database as db
 
 
@@ -30,22 +31,22 @@ class _BlockPayload(aiohttp.Payload):
        chunked" on chunked uploads.
 
     We can't use BytesPayload because it writes everything in one shot,
-    giving no chance to update transfer.transferred between chunks.
+    giving no chance to report progress between chunks.
 
     This class sets _size explicitly (so aiohttp sends Content-Length) and
-    writes data in chunks of 64KB, updating transfer.transferred after
-    each chunk so the frontend computes real-time speed.
+    writes data in 64KB chunks, invoking ``on_progress(len(chunk))`` after
+    each chunk. A callback (rather than a direct ``transfer`` reference) is
+    used because blocks are uploaded concurrently: each block adds its own
+    delta into a shared counter, so out-of-order completion can't make the
+    reported byte count jump backwards.
     """
 
-    def __init__(self, data: bytes, transfer=None, base: int = 0,
-                 filename: str = None,
+    def __init__(self, data: bytes, on_progress=None, filename: str = None,
                  content_type: str = "application/octet-stream"):
         super().__init__(value=data, content_type=content_type,
                          filename=filename)
         self._size = len(data)
-        self._consumed = False
-        self._transfer = transfer
-        self._base = base
+        self._on_progress = on_progress
         self._read_bytes = 0
         self._body_data = data
 
@@ -63,10 +64,10 @@ class _BlockPayload(aiohttp.Payload):
             await writer.write(bytes(chunk))
             pos += len(chunk)
             self._read_bytes = pos
-            if self._transfer is not None:
-                self._transfer.transferred = self._base + pos
-            # Yield to event loop so concurrent transfers and the polling
-            # task get a chance to run between our writes.
+            if self._on_progress is not None:
+                self._on_progress(len(chunk))
+            # Yield to event loop so concurrent block uploads and the
+            # polling task get a chance to run between our writes.
             await asyncio.sleep(0)
 
     def decode(self, encoding: str = "utf-8", errors: str = "strict") -> str:
@@ -353,6 +354,7 @@ class BaiduProvider(CloudProvider):
                                _transfer=None) -> bool:
         """Upload a large file using the precreate/upload/create flow."""
         num_blocks = math.ceil(file_size / BLOCK_SIZE)
+        upload_concurrency = UPLOAD_CONCURRENCY
 
         # Calculate block MD5s in a thread to avoid blocking the event loop
         def _calc_md5s():
@@ -366,7 +368,8 @@ class BaiduProvider(CloudProvider):
 
         block_md5_list = await asyncio.to_thread(_calc_md5s)
 
-        # 1. Precreate
+        # 1. Precreate (retried — a hiccup here would otherwise fail the
+        # whole file before a single byte is sent)
         await self._ensure_token()
         params = {
             "method": "precreate",
@@ -380,70 +383,128 @@ class BaiduProvider(CloudProvider):
             "autoinit": 1,
         }
         session = await self._get_session()
-        async with session.post(f"{PAN_API_BASE}/file", params=params,
-                                 data=precreate_data) as resp:
-            # Precreate uses xpan endpoint which returns proper JSON
-            text = await resp.text()
-            try:
-                data = json.loads(text)
-            except json.JSONDecodeError:
-                raise RuntimeError(f"Precreate returned non-JSON: {text[:200]}")
-            if data.get("errno"):
-                raise RuntimeError(f"Precreate failed: {data}")
-            uploadid = data.get("uploadid")
-            if not uploadid:
-                raise RuntimeError(f"No uploadid in precreate response: {data}")
 
-        # 2. Upload blocks
-        uploaded = 0
-        with open(local_path, "rb") as f:
-            for i in range(num_blocks):
-                block_data = f.read(BLOCK_SIZE)
-                block_len = len(block_data) if isinstance(block_data, bytes) else BLOCK_SIZE
-                part_params = {
-                    "method": "upload",
-                    "access_token": self.access_token,
-                    "type": "tmpfile",
-                    "path": remote_path,
-                    "uploadid": uploadid,
-                    "partseq": i,
-                }
-                # Use a custom Payload that streams with progress updates
-                # while sending a Content-Length header. Required because:
-                # - IOBasePayload falls back to chunked encoding (no fileno
-                #   on BytesIO), but Baidu superfile2 rejects chunked
-                #   with errno=31211.
-                # - BytesPayload writes everything in one shot with no
-                #   progress opportunity.
-                block_payload = _BlockPayload(
-                    block_data, transfer=_transfer, base=uploaded,
-                    filename=f"block_{i}",
-                )
-                form = aiohttp.FormData()
-                form.add_field("file", block_payload,
-                               filename=f"block_{i}")
-                async with session.post(f"{PCS_API_BASE}/superfile2",
-                                         params=part_params, data=form) as resp:
-                    # /pcs/superfile2 sometimes returns text/html Content-Type for JSON
-                    text = await resp.text()
+        async def do_precreate() -> str:
+            async with session.post(f"{PAN_API_BASE}/file", params=params,
+                                     data=precreate_data) as resp:
+                # Precreate uses xpan endpoint which returns proper JSON
+                text = await resp.text()
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError:
+                    raise RuntimeError(f"Precreate returned non-JSON: {text[:200]}")
+                if data.get("errno"):
+                    raise RuntimeError(f"Precreate failed: {data}")
+                created_uploadid = data.get("uploadid")
+                if not created_uploadid:
+                    raise RuntimeError(f"No uploadid in precreate response: {data}")
+                return created_uploadid
+
+        uploadid = await retry_async(
+            do_precreate, what=f"precreate {os.path.basename(remote_path)}")
+
+        # 2. Upload blocks — in parallel, each block retried independently.
+        # Blocks finish out of order, so progress is aggregated through a
+        # shared counter instead of a per-block absolute offset.
+        state = {"total": 0}
+        written = [0] * num_blocks
+
+        def make_progress_cb(idx: int):
+            def cb(delta: int) -> None:
+                written[idx] += delta
+                state["total"] += delta
+                if _transfer is not None:
+                    _transfer.transferred = min(state["total"], file_size)
+            return cb
+
+        async def upload_block(idx: int, block_data: bytes) -> None:
+            """Single attempt at uploading one block."""
+            part_params = {
+                "method": "upload",
+                "access_token": self.access_token,
+                "type": "tmpfile",
+                "path": remote_path,
+                "uploadid": uploadid,
+                "partseq": idx,
+            }
+            # A payload can only be consumed once, so it must be built
+            # inside the attempt (not reused across retries).
+            block_payload = _BlockPayload(
+                block_data, on_progress=make_progress_cb(idx),
+                filename=f"block_{idx}",
+            )
+            form = aiohttp.FormData()
+            form.add_field("file", block_payload, filename=f"block_{idx}")
+            async with session.post(f"{PCS_API_BASE}/superfile2",
+                                     params=part_params, data=form) as resp:
+                # /pcs/superfile2 sometimes returns text/html Content-Type for JSON
+                text = await resp.text()
+                try:
+                    block_data_resp = json.loads(text)
+                except json.JSONDecodeError:
+                    raise RuntimeError(
+                        f"Block {idx} upload returned non-JSON: {text[:200]}")
+                if block_data_resp.get("error_code"):
+                    raise RuntimeError(
+                        f"Block {idx} upload failed: {block_data_resp}")
+                # /pcs/superfile2 returns {"md5": "..."} on success
+                if not block_data_resp.get("md5"):
+                    raise RuntimeError(
+                        f"Block {idx} upload no md5 in response: {block_data_resp}")
+
+        async def upload_block_with_retry(idx: int, block_data: bytes) -> None:
+            def on_retry(_attempt_no: int, _exc: BaseException) -> None:
+                # Undo the byte count of the failed attempt so the retry
+                # re-adds it instead of double counting.
+                state["total"] -= written[idx]
+                written[idx] = 0
+
+            await retry_async(
+                lambda: upload_block(idx, block_data),
+                what=f"block {idx + 1}/{num_blocks} of "
+                     f"{os.path.basename(remote_path)}",
+                on_retry=on_retry,
+            )
+
+        # Bounded worker pool. Each worker opens its own file handle so no
+        # handle is ever seeked from two coroutines at once, and memory stays
+        # bounded at (workers * BLOCK_SIZE).
+        queue: asyncio.Queue = asyncio.Queue()
+        for i in range(num_blocks):
+            queue.put_nowait(i)
+
+        abort = asyncio.Event()
+        errors: list[BaseException] = []
+
+        async def worker() -> None:
+            with open(local_path, "rb") as fh:
+                while not abort.is_set():
                     try:
-                        block_data_resp = json.loads(text)
-                    except json.JSONDecodeError:
-                        raise RuntimeError(
-                            f"Block {i} upload returned non-JSON: {text[:200]}")
-                    if block_data_resp.get("error_code"):
-                        raise RuntimeError(
-                            f"Block {i} upload failed: {block_data_resp}")
-                    # /pcs/superfile2 returns {"md5": "..."} on success
-                    if not block_data_resp.get("md5"):
-                        raise RuntimeError(
-                            f"Block {i} upload no md5 in response: {block_data_resp}")
+                        idx = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        return
+                    fh.seek(idx * BLOCK_SIZE)
+                    block_data = fh.read(BLOCK_SIZE)
+                    try:
+                        await upload_block_with_retry(idx, block_data)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - collected below
+                        errors.append(exc)
+                        abort.set()
+                        return
+                    if progress_callback:
+                        # Doubles as the per-block cancellation check.
+                        await progress_callback(
+                            min(state["total"], file_size), file_size)
 
-                uploaded += block_len
-                if progress_callback:
-                    await progress_callback(min(uploaded, file_size), file_size)
+        worker_count = max(1, min(upload_concurrency, num_blocks))
+        await asyncio.gather(*(worker() for _ in range(worker_count)))
 
-        # 3. Create (finalize)
+        if errors:
+            raise errors[0]
+
+        # 3. Create (finalize) — retried for the same reason as precreate
         create_params = {
             "method": "create",
             "access_token": self.access_token,
@@ -455,16 +516,21 @@ class BaiduProvider(CloudProvider):
             "block_list": json.dumps(block_md5_list),
             "uploadid": uploadid,
         }
-        async with session.post(f"{PAN_API_BASE}/file", params=create_params,
-                                 data=create_data) as resp:
-            text = await resp.text()
-            try:
-                data = json.loads(text)
-            except json.JSONDecodeError:
-                raise RuntimeError(f"Create returned non-JSON: {text[:200]}")
-            if data.get("errno"):
-                raise RuntimeError(f"Create failed: {data}")
-            return True
+
+        async def do_create() -> bool:
+            async with session.post(f"{PAN_API_BASE}/file", params=create_params,
+                                     data=create_data) as resp:
+                text = await resp.text()
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError:
+                    raise RuntimeError(f"Create returned non-JSON: {text[:200]}")
+                if data.get("errno"):
+                    raise RuntimeError(f"Create failed: {data}")
+                return True
+
+        return await retry_async(
+            do_create, what=f"create {os.path.basename(remote_path)}")
 
     async def download_file(self, remote_path: str, local_path: str,
                             progress_callback=None) -> bool:
