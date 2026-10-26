@@ -69,7 +69,10 @@ BAIDU_APP_SECRET = os.environ.get("BAIDU_APP_SECRET") or BAIDU_DEFAULT_APP_SECRE
 BAIDU_OAUTH_TOOL_URL = (
     "https://openapi.baidu.com/oauth/2.0/authorize"
     "?response_type=code"
-    "&client_id=NqOMXF6XGhGRIGemsQ9nG0Na"
+    # Reference the variable, not a second copy of the literal: with the key
+    # hardcoded here, overriding BAIDU_APP_KEY (env or DB setting) silently
+    # left this link pointing at the old app id.
+    f"&client_id={BAIDU_APP_KEY}"
     "&redirect_uri=oob"
     "&scope=basic,netdisk"
     "&display=popup"

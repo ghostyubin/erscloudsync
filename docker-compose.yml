@@ -20,12 +20,17 @@ services:
     ports:
       - "5566:5566"
     volumes:
-      # Config directory (database, logs) - persistent
-      - /vol1/1000/docker/baudusync:/config
+      # Defaults are directories next to this file (see .gitignore). On a NAS,
+      # put the real absolute paths in a .env file rather than editing this one:
+      #   BAUDUSYNC_CONFIG_DIR=/volume1/docker/baudusync
+      #   BAUDUSYNC_SYNC_DIR=/volume1/sync
+      #   BAUDUSYNC_DOWNLOAD_DIR=/volume1/downloads
+      # Config directory (database, logs) - persistent, must survive rebuilds
+      - ${BAUDUSYNC_CONFIG_DIR:-./config}:/config
       # Sync directory - mount your NAS storage here
-      - /vol1/1000/sync:/sync
+      - ${BAUDUSYNC_SYNC_DIR:-./sync}:/sync
       # Downloads directory - for files downloaded from cloud
-      - /vol1/1000/downloads:/downloads
+      - ${BAUDUSYNC_DOWNLOAD_DIR:-./downloads}:/downloads
     environment:
       # The image runs on UTC; without this every log line and every timestamp
       # in the UI is 8 hours off on a China-based NAS.

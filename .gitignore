@@ -23,12 +23,15 @@ env/
 
 # Runtime data (must NOT be committed)
 data/
+config/
 sync/
 downloads/
 *.db
 *.db-journal
 *.log
 *.log.*
+# local deployment overrides (contains host paths, may contain credentials)
+.env
 
 # IDE / Editor
 .vscode/

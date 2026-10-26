@@ -1,4 +1,6 @@
 data/
+config/
+.env
 *.pyc
 __pycache__/
 *.pyo

@@ -111,6 +111,29 @@ docker compose -f docker-compose.test.yml pull && docker compose -f docker-compo
 | BAIDU_APP_SECRET | (内置) | 百度网盘 OAuth App Secret |
 | BAIDU_REDIRECT_URI | oob | OAuth 回调方式 |
 
+下面三个只在 `docker-compose.yml` 里做路径插值（宿主机的卷挂载点），**不传入容器**：
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| BAUDUSYNC_CONFIG_DIR | ./config | 宿主机侧的 /config 挂载源 |
+| BAUDUSYNC_SYNC_DIR | ./sync | 宿主机侧的 /sync 挂载源 |
+| BAUDUSYNC_DOWNLOAD_DIR | ./downloads | 宿主机侧的 /downloads 挂载源 |
+
+建议把它们写进 `.env`（已被 git 忽略），而不是改 compose 文件：
+
+```bash
+cat > .env <<'EOF'
+BAUDUSYNC_CONFIG_DIR=/volume1/docker/baudusync
+BAUDUSYNC_SYNC_DIR=/volume1/sync
+BAUDUSYNC_DOWNLOAD_DIR=/volume1/downloads
+EOF
+```
+
+> 关于内置百度凭据：`BAIDU_APP_KEY/SECRET` 默认值是 ES 文件管理器的公开凭据
+> （来源见 [OpenListTeam 讨论](https://github.com/orgs/OpenListTeam/discussions/19)），
+> 属于"公开的第三方客户端凭据"而非本项目的私有密钥，因此随代码分发。
+> 如要换成自己的应用，用环境变量或界面里的设置覆盖即可，无需改代码。
+
 ### 卷挂载说明
 
 | 容器路径 | 用途 | 持久化 |
@@ -254,6 +277,25 @@ compose 的 `environment` 若写成 `- BAIDU_APP_KEY=`（值为空），变量�
 从而**覆盖**内置的 ES 文件管理器凭据，授权请求会带着空 `client_id` 发出去。
 代码里已按「空值视为未配置」处理（`os.environ.get(k) or DEFAULT`），
 但更稳妥的做法是**不要写这一行**。需要自定义凭据时才填非空值。
+
+## 安全与脱敏
+
+仓库和镜像里**不含**任何用户凭据：
+
+- 凭据（百度 access/refresh token、115 的 UID/CID/SEID Cookie）只存在
+  `/config/baudusync.db`，这个目录是宿主机挂载进来的，既不会进镜像也不会进仓库
+- Dockerfile 只 `COPY app/ frontend/` 两个目录，`data/`、`config/`、`.env`
+  在 `.dockerignore` 里也被排除
+- `.gitignore` 覆盖 `data/ config/ sync/ downloads/ *.db *.log .env`
+- `GET /api/connections` 返回的 `credentials` 全部替换成 `***`
+  （`access_token` / `refresh_token` / 115 的 Cookie 都在内），
+  只额外给出 `token_expired`、`token_expires_at` 这类元信息
+- 应用密钥接口对 `app_secret` 永远返回 `***`；`app_key` 仅在用内置凭据时明文回显
+  （它本来就会出现在授权页 URL 里），自定义的 key 只显示前 4 位
+- 错误信息拼接的是 `errno` 和 `errmsg`，不拼 URL，因此 `access_token`
+  不会随异常写进日志、任务历史或下载记录
+
+唯一硬编码的是**内置的百度公开凭据**（见上面的说明），可用环境变量覆盖。
 
 ## 项目结构
 
