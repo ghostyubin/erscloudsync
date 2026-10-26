@@ -13,7 +13,7 @@ from watchdog.events import FileSystemEventHandler
 
 from app.services.sync_engine import SyncEngine, DEFAULT_EXCLUDE_PATTERNS
 from app import database as db
-from app.config import LOCAL_SYNC_ROOT, DOWNLOAD_DIR
+from app.config import LOCAL_SYNC_ROOT, DOWNLOAD_DIR, REALTIME_MAX_DELAY, REALTIME_WRITE_GRACE
 import logging
 
 logger = logging.getLogger(__name__)
@@ -22,11 +22,18 @@ logger = logging.getLogger(__name__)
 class FileChangeHandler(FileSystemEventHandler):
     """Handles local file change events for real-time sync."""
 
-    def __init__(self, task_id: int, local_path: str, debounce_seconds: int = 5):
+    def __init__(self, task_id: int, local_path: str, debounce_seconds: int = 5,
+                 max_delay: Optional[float] = None,
+                 write_grace: Optional[float] = None):
         self.task_id = task_id
         self.local_path = local_path
         self.debounce_seconds = debounce_seconds
+        # Longest time a batch may be postponed by a never-ending stream of
+        # events (copying hundreds of GB). 0 = wait for the tree to settle.
+        self.max_delay = REALTIME_MAX_DELAY if max_delay is None else max_delay
+        self.write_grace = REALTIME_WRITE_GRACE if write_grace is None else write_grace
         self._last_trigger = 0.0
+        self._batch_started = 0.0
         self._debounce_task: Optional[asyncio.Task] = None
         # Capture the main event loop here (runs in main thread).
         # watchdog's Observer runs callbacks in a separate thread where
@@ -57,31 +64,71 @@ class FileChangeHandler(FileSystemEventHandler):
         """
         if self._debounce_task and not self._debounce_task.done():
             return
+        self._batch_started = time.time()
         self._debounce_task = self._loop.create_task(self._debounced_sync())
+
+    def _quiet(self) -> bool:
+        """True when no file event has arrived for the debounce window."""
+        return time.time() - self._last_trigger >= self.debounce_seconds - 1
+
+    def _settled(self) -> bool:
+        """True when the current batch is allowed to run."""
+        if self._quiet():
+            return True
+        # The tree is still changing. Copying a few hundred GB keeps firing
+        # events for hours, so the sync would never start; cap the wait and
+        # sync what has landed so far. Files still being written are skipped
+        # by the scanner (write_grace), the rest is picked up next cycle.
+        if self.max_delay > 0 and time.time() - self._batch_started >= self.max_delay:
+            return True
+        return False
 
     async def _debounced_sync(self):
         try:
+            # After a cycle that started mid-copy we owe one catch-up pass,
+            # because the scanner skipped files that were still being written.
+            # That pass waits for the tree to go quiet instead of firing on the
+            # max_delay cap again — otherwise the cap would start a fresh cycle
+            # every 30s even when there is nothing left to do.
+            catchup = False
+            catchup_deadline = 0.0
             while True:
-                # Wait until the burst of file events settles down.
-                while time.time() - self._last_trigger < self.debounce_seconds - 1:
+                if catchup:
+                    def ready():
+                        # Quiet, or a new copy showed up and the cap expired.
+                        return self._quiet() or (
+                            self.max_delay > 0 and time.time() >= catchup_deadline)
+                else:
+                    def ready():
+                        return self._settled()
+                # Wait until the burst of file events settles down (or the
+                # batch has been pending longer than max_delay).
+                while not ready():
                     await asyncio.sleep(1)
                 # A sync may already be running for this task; let it finish so
                 # the changes made meanwhile are picked up by the next cycle
                 # instead of racing with it.
                 while SyncEngine.is_running(self.task_id):
                     await asyncio.sleep(2)
-                    # Changes arrived while waiting: restart the settle timer.
-                    while time.time() - self._last_trigger < self.debounce_seconds - 1:
+                    while not ready():
                         await asyncio.sleep(1)
-                started = time.time()
+                forced = not self._quiet()
+                self._batch_started = time.time()
+                started = self._batch_started
                 logger.info(f"File change detected, triggering sync for task {self.task_id}")
-                await SyncEngine.sync_task(self.task_id)
+                await SyncEngine.sync_task(self.task_id, write_grace=self.write_grace)
                 # Events that arrive while the sync runs are not queued
                 # anywhere (_schedule_debounced_sync returns early because this
                 # task is still alive). If the copy was still writing during
                 # the cycle, run once more so those files are not missed.
-                if self._last_trigger <= started:
-                    return
+                if self._last_trigger > started:
+                    catchup = False
+                    continue
+                if forced:
+                    catchup = True
+                    catchup_deadline = time.time() + self.max_delay
+                    continue
+                return
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -171,6 +218,8 @@ class SyncScheduler:
                 # Run initial sync in background — don't block app startup.
                 # If we await here, uvicorn stays stuck on "Waiting for
                 # application startup" and never starts listening on the port.
+                # No write_grace here: the startup pass is the catch-up pass,
+                # and a file skipped now might never get another event.
                 SyncEngine.spawn(task_id)
 
     @staticmethod

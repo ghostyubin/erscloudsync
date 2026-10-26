@@ -28,6 +28,18 @@ SYNC_RETRY_DELAY = float(os.environ.get("BAUDUSYNC_RETRY_DELAY", "3"))
 # 1 restores the old sequential behaviour.
 UPLOAD_CONCURRENCY = int(os.environ.get("BAUDUSYNC_UPLOAD_CONCURRENCY", "4"))
 
+# Real-time sync: how long the file watcher waits for the tree to go quiet
+# before starting a cycle. A long copy (hundreds of GB) keeps emitting events,
+# which would postpone the sync indefinitely, so once a batch has been pending
+# for this many seconds the cycle runs anyway and the rest is picked up later.
+# 0 = always wait for the tree to settle (the old behaviour).
+REALTIME_MAX_DELAY = float(os.environ.get("BAUDUSYNC_REALTIME_MAX_DELAY", "30"))
+
+# Files modified more recently than this (seconds) are treated as "still being
+# written" and skipped by real-time cycles. Without it, the max-delay path
+# above would upload a half-copied photo and push it again once it is complete.
+REALTIME_WRITE_GRACE = float(os.environ.get("BAUDUSYNC_WRITE_GRACE", "3"))
+
 # Local sync root (mounted volume in Docker, fallback to local dir for dev)
 LOCAL_SYNC_ROOT = Path(os.environ.get("BAUDUSYNC_SYNC_ROOT", str(BASE_DIR / "sync")))
 

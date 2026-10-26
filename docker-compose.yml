@@ -45,6 +45,15 @@ services:
       - BAUDUSYNC_MAX_RETRIES=3
       # RETRY_DELAY: base backoff in seconds; attempt N waits N * delay
       - BAUDUSYNC_RETRY_DELAY=3
+      # REALTIME_MAX_DELAY: a real-time task normally starts a cycle once the
+      # folder has been quiet for ~4s. Copying a huge folder never goes quiet,
+      # so after this many seconds it starts anyway and the rest is picked up
+      # by the following cycle. 0 = always wait for the copy to finish.
+      - BAUDUSYNC_REALTIME_MAX_DELAY=30
+      # WRITE_GRACE: files modified within the last N seconds are treated as
+      # "still being copied" and skipped, so a half-written file is never
+      # uploaded and then pushed again when it is complete.
+      - BAUDUSYNC_WRITE_GRACE=3
     # Override command to use port 5566.
     # --log-level warning quiets uvicorn's access log; the frontend polls every 3s
     # and would otherwise flood logs with "200 OK" lines.

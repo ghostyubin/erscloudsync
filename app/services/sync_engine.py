@@ -104,9 +104,9 @@ class SyncEngine:
     _bg_tasks: set = set()
 
     @classmethod
-    def spawn(cls, task_id: int) -> "asyncio.Task":
+    def spawn(cls, task_id: int, **kwargs) -> "asyncio.Task":
         """Start a sync in the background, keeping a reference to the task."""
-        t = asyncio.create_task(cls.sync_task(task_id))
+        t = asyncio.create_task(cls.sync_task(task_id, **kwargs))
         cls._bg_tasks.add(t)
         t.add_done_callback(cls._bg_tasks.discard)
         return t
@@ -140,8 +140,13 @@ class SyncEngine:
         return transfer_id in cls._cancelled_transfers.get(task_id, set())
 
     @classmethod
-    async def sync_task(cls, task_id: int):
-        """Execute a full sync cycle for a task."""
+    async def sync_task(cls, task_id: int, write_grace: float = 0.0):
+        """Execute a full sync cycle for a task.
+
+        ``write_grace`` is forwarded to the scanner; only the real-time watcher
+        sets it, because only that path can start a cycle while files are still
+        being copied in.
+        """
         if task_id in cls._running_tasks:
             return  # Already running
 
@@ -201,7 +206,9 @@ class SyncEngine:
 
             # Scan local and remote files
             await db.db_add_log(task_id, "info", detail="Scanning local files...")
-            local_files = await cls._scan_local(local_base, include_patterns, exclude_patterns, max_size)
+            local_files = await cls._scan_local(
+                local_base, include_patterns, exclude_patterns, max_size,
+                write_grace=write_grace)
 
             await db.db_add_log(task_id, "info", detail="Listing remote files...")
             remote_files = await provider.list_all_files(remote_base)
@@ -652,9 +659,17 @@ class SyncEngine:
 
     @classmethod
     async def _scan_local(cls, base_path: str, include: list[str],
-                          exclude: list[str], max_size: int) -> list[FileInfo]:
-        """Scan local directory and return list of FileInfo objects."""
+                          exclude: list[str], max_size: int,
+                          write_grace: float = 0.0) -> list[FileInfo]:
+        """Scan local directory and return list of FileInfo objects.
+
+        ``write_grace``: skip files modified within the last N seconds. Used by
+        real-time cycles that are allowed to start before a big copy has
+        settled — a partially written photo would otherwise be uploaded and
+        then re-uploaded once it is complete.
+        """
         result = []
+        cutoff = (time.time() - write_grace) if write_grace > 0 else 0.0
         for root, dirs, files in os.walk(base_path):
             for filename in files:
                 full_path = os.path.join(root, filename)
@@ -673,6 +688,8 @@ class SyncEngine:
                     stat = os.stat(full_path)
                     if max_size and stat.st_size > max_size:
                         continue
+                    if cutoff and stat.st_mtime > cutoff:
+                        continue  # still being written
                     result.append(FileInfo(
                         path=full_path,
                         name=filename,
