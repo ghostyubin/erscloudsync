@@ -5,14 +5,24 @@ from app.providers.baidu import BaiduProvider
 from app.providers.p115 import Provider115
 
 
-def get_provider(conn_type: str, credentials: dict) -> CloudProvider:
-    """Factory method to get a cloud provider instance."""
+def get_provider(conn_type: str, credentials: dict, conn_id: int = None) -> CloudProvider:
+    """Factory method to get a cloud provider instance.
+
+    ``conn_id`` is forwarded so providers can persist refreshed tokens back
+    to the database (see BaiduProvider.persist_credentials).
+    """
     if conn_type == "baidu":
-        return BaiduProvider(credentials)
+        provider = BaiduProvider(credentials)
     elif conn_type == "115":
-        return Provider115(credentials)
+        provider = Provider115(credentials)
     else:
         raise ValueError(f"Unknown provider type: {conn_type}")
+    if conn_id is not None:
+        try:
+            provider.conn_id = conn_id
+        except Exception:  # provider may use __slots__
+            pass
+    return provider
 
 
 def format_size(size: int) -> str:

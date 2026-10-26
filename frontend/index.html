@@ -566,6 +566,22 @@
     </div>
 </div>
 
+<!-- Modal: Re-authorize existing connection (token expired) -->
+<div id="modal-reauth" class="modal" style="display:none;">
+    <div class="modal-overlay" onclick="app.closeModal('modal-reauth')"></div>
+    <div class="modal-content modal-lg">
+        <div class="modal-header">
+            <h2 id="reauth-title">重新授权</h2>
+            <button class="modal-close" onclick="app.closeModal('modal-reauth')">&times;</button>
+        </div>
+        <div class="modal-body" id="reauth-body"></div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="app.closeModal('modal-reauth')">取消</button>
+            <button class="btn btn-primary" onclick="app.submitReauth()">确认更新</button>
+        </div>
+    </div>
+</div>
+
 <!-- Toast container -->
 <div id="toast-container"></div>
 

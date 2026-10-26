@@ -54,10 +54,42 @@ class Cookies115Request(BaseModel):
     cookies: dict
 
 
+class ReauthRequest(BaseModel):
+    """Re-authorize an existing connection in place (keeps id and tasks)."""
+    code: str = ""            # Baidu: OAuth authorization code
+    refresh_token: str = ""   # Baidu: refresh_token pasted from AList tool
+    cookies: dict = {}        # 115: UID / CID / SEID
+
+
+def _conn_public(conn: dict) -> dict:
+    """Connection dict safe to send to the UI.
+
+    Credentials are masked (they used to be returned in plain text, including
+    access_token / refresh_token / cookies) and token metadata is added so the
+    UI can show "已过期" and offer a refresh button.
+    """
+    out = {k: v for k, v in conn.items() if k != "credentials"}
+    creds = conn.get("credentials") or {}
+    out["credentials"] = {k: "***" for k in creds}
+
+    if conn.get("type") == "baidu":
+        expires_at = creds.get("expires_at") or 0
+        out["token_expires_at"] = expires_at
+        out["token_expired"] = bool(expires_at and time.time() > expires_at)
+        out["has_refresh_token"] = bool(creds.get("refresh_token"))
+        out["auth_type"] = "oauth" if creds.get("refresh_token") else "token"
+    else:
+        out["token_expires_at"] = 0
+        out["token_expired"] = False
+        out["has_refresh_token"] = bool(creds.get("cookies"))
+        out["auth_type"] = "cookies"
+    return out
+
+
 @router.get("")
 async def list_connections():
     connections = await db.db_list_connections()
-    return {"connections": connections}
+    return {"connections": [_conn_public(c) for c in connections]}
 
 
 @router.get("/{conn_id}")
@@ -65,9 +97,7 @@ async def get_connection(conn_id: int):
     conn = await db.db_get_connection(conn_id)
     if not conn:
         raise HTTPException(404, "Connection not found")
-    # Don't expose full credentials
-    conn["credentials"] = {k: "***" for k in conn.get("credentials", {})}
-    return conn
+    return _conn_public(conn)
 
 
 @router.post("/baidu/token")
@@ -285,13 +315,147 @@ async def test_connection(conn_id: int):
     if not conn:
         raise HTTPException(404, "Connection not found")
 
-    provider = get_provider(conn["type"], conn["credentials"])
+    provider = get_provider(conn["type"], conn["credentials"], conn_id=conn_id)
     try:
         success = await provider.test_connection()
         await db.db_update_connection(conn_id, status="connected" if success else "error")
         return {"connected": success}
     finally:
         await provider.close()
+
+
+@router.post("/{conn_id}/refresh")
+async def refresh_connection_token(conn_id: int):
+    """Renew the access token of an existing connection (Baidu).
+
+    Uses the stored refresh_token, so the connection id — and every sync task
+    bound to it — stays intact. This is what the "刷新令牌" button calls
+    before falling back to a full re-authorization.
+    """
+    conn = await db.db_get_connection(conn_id)
+    if not conn:
+        raise HTTPException(404, "Connection not found")
+    if conn["type"] != "baidu":
+        raise HTTPException(400, "只有百度网盘连接需要刷新令牌，115 请更新 Cookie")
+
+    provider = BaiduProvider(conn["credentials"])
+    provider.conn_id = conn_id
+    try:
+        try:
+            creds = await provider.force_refresh()
+        except Exception as e:
+            await db.db_update_connection(conn_id, status="error")
+            raise HTTPException(400, f"刷新令牌失败: {e}")
+
+        ok, msg = await provider.test_connection_detailed()
+    finally:
+        await provider.close()
+
+    if not ok:
+        await db.db_update_connection(conn_id, status="error")
+        raise HTTPException(400, f"令牌已更新但连接测试失败: {msg}")
+
+    await db.db_update_connection(conn_id, credentials=creds, status="connected")
+    return {
+        "refreshed": True,
+        "expires_at": creds.get("expires_at", 0),
+        "message": msg,
+    }
+
+
+@router.post("/{conn_id}/reauth")
+async def reauth_connection(conn_id: int, req: ReauthRequest):
+    """Replace the credentials of an existing connection in place.
+
+    Unlike creating a new connection, this keeps the connection id, so all
+    sync tasks and their incremental state survive a re-login.
+    """
+    conn = await db.db_get_connection(conn_id)
+    if not conn:
+        raise HTTPException(404, "Connection not found")
+
+    if conn["type"] == "baidu":
+        from app.config import get_baidu_app_credentials
+        app_key, app_secret = await get_baidu_app_credentials()
+        if not app_key:
+            raise HTTPException(400, "百度应用凭据未配置")
+
+        if req.code:
+            try:
+                creds = await BaiduProvider.exchange_code(
+                    req.code.strip(), app_key, app_secret, BAIDU_REDIRECT_URI)
+            except Exception as e:
+                raise HTTPException(400, f"授权码无效: {e}")
+        elif req.refresh_token:
+            try:
+                creds = await BaiduProvider.exchange_refresh_token(
+                    req.refresh_token.strip(), app_key, app_secret)
+            except Exception as e:
+                raise HTTPException(400, f"refresh_token 无效: {e}")
+        else:
+            raise HTTPException(400, "请提供授权码或 refresh_token")
+
+        provider = BaiduProvider(creds)
+        provider.conn_id = conn_id
+        try:
+            ok, msg = await provider.test_connection_detailed()
+        except Exception as e:
+            ok, msg = False, str(e)
+        finally:
+            await provider.close()
+
+        if not ok:
+            raise HTTPException(400, f"授权成功但连接测试失败: {msg}")
+
+        await db.db_update_connection(conn_id, credentials=creds, status="connected")
+        return {
+            "reauthorized": True,
+            "expires_at": creds.get("expires_at", 0),
+            "message": msg,
+        }
+
+    # ---- 115: replace cookies ----
+    if not req.cookies:
+        raise HTTPException(400, "请提供 115 Cookie (UID / CID / SEID)")
+
+    provider = Provider115({"cookies": req.cookies})
+    try:
+        ok = await provider.test_connection()
+    finally:
+        await provider.close()
+
+    if not ok:
+        raise HTTPException(400, "Cookie 无效或已过期，请重新扫码登录")
+
+    merged = dict(conn.get("credentials") or {})
+    merged["cookies"] = req.cookies
+    await db.db_update_connection(conn_id, credentials=merged, status="connected")
+    return {"reauthorized": True}
+
+
+@router.get("/{conn_id}/auth-url")
+async def get_reauth_url(conn_id: int):
+    """Return the Baidu authorize URL (redirect_uri=oob) for re-authorization."""
+    conn = await db.db_get_connection(conn_id)
+    if not conn:
+        raise HTTPException(404, "Connection not found")
+
+    from app.config import get_baidu_app_credentials
+    app_key, _ = await get_baidu_app_credentials()
+    authorize_url = (
+        "https://openapi.baidu.com/oauth/2.0/authorize"
+        "?response_type=code"
+        f"&client_id={app_key}"
+        f"&redirect_uri={BAIDU_REDIRECT_URI}"
+        "&scope=basic,netdisk"
+        "&display=page"
+    )
+    return {
+        "authorize_url": authorize_url,
+        "oauth_tool_url": BAIDU_OAUTH_TOOL_URL,
+        "redirect_uri": BAIDU_REDIRECT_URI,
+        "app_key_configured": bool(app_key),
+    }
 
 
 @router.delete("/{conn_id}")

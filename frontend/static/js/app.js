@@ -368,7 +368,26 @@ const App = {
         const typeIcons = { baidu: '📦', '115': '💾' };
         const typeNames = { baidu: '百度网盘', '115': '115 网盘' };
 
-        container.innerHTML = this.connections.map(c => `
+        container.innerHTML = this.connections.map(c => {
+            const isBaidu = c.type === 'baidu';
+            const expired = !!c.token_expired;
+            const expiresText = c.token_expires_at
+                ? `令牌有效期至 ${this.formatTime(c.token_expires_at)}`
+                : '';
+            const tokenLine = isBaidu
+                ? (expired
+                    ? `<div style="font-size:12px;color:var(--color-error);margin-top:6px">⚠️ 令牌已过期，同步会失败，请刷新或重新授权</div>`
+                    : (expiresText
+                        ? `<div style="font-size:12px;color:var(--text-muted);margin-top:6px">${expiresText}</div>`
+                        : ''))
+                : '';
+            const refreshBtn = isBaidu
+                ? `<button class="btn btn-secondary btn-sm" onclick="app.refreshConnectionToken(${c.id})">刷新令牌</button>`
+                : '';
+            const reauthBtn = isBaidu
+                ? `<button class="btn btn-secondary btn-sm" onclick="app.openReauthDialog(${c.id})">重新授权</button>`
+                : `<button class="btn btn-secondary btn-sm" onclick="app.openReauthDialog(${c.id})">更新 Cookie</button>`;
+            return `
             <div class="conn-card">
                 <div class="conn-card-header">
                     <div class="conn-card-icon">${typeIcons[c.type] || '☁️'}</div>
@@ -381,16 +400,21 @@ const App = {
                     <span class="badge ${c.status === 'connected' ? 'badge-realtime' : 'badge-error'}">
                         ${c.status === 'connected' ? '● 已连接' : '● 未连接'}
                     </span>
+                    ${expired ? '<span class="badge badge-error" style="margin-left:6px">令牌过期</span>' : ''}
                 </div>
+                ${tokenLine}
                 <div style="font-size:12px;color:var(--text-muted);margin-top:8px">
                     创建于 ${this.formatTime(c.created_at)}
                 </div>
                 <div class="conn-card-actions">
                     <button class="btn btn-secondary btn-sm" onclick="app.testConnection(${c.id})">测试</button>
+                    ${refreshBtn}
+                    ${reauthBtn}
                     <button class="btn btn-secondary btn-sm" onclick="app.browseRemote(${c.id})">浏览</button>
                     <button class="btn btn-danger btn-sm" onclick="app.deleteConnection(${c.id})">删除</button>
                 </div>
-            </div>`).join('');
+            </div>`;
+        }).join('');
     },
 
     openAddConnectionDialog() {
@@ -547,6 +571,116 @@ const App = {
             this.toast(result.connected ? '连接成功' : '连接失败', result.connected ? 'success' : 'error');
             this.loadConnections();
         } catch (e) { this.toast('测试失败: ' + e.message, 'error'); }
+    },
+
+    // ---- Token maintenance ----
+    async refreshConnectionToken(id) {
+        const conn = this.connections.find(c => c.id === id);
+        const name = conn ? conn.name : '';
+        this.toast('正在刷新令牌…', 'info');
+        try {
+            const r = await this.api('POST', `/api/connections/${id}/refresh`);
+            const when = r.expires_at ? this.formatTime(r.expires_at) : '';
+            this.toast(`「${name}」令牌已刷新${when ? '，有效期至 ' + when : ''}`, 'success');
+        } catch (e) {
+            this.toast('刷新失败: ' + e.message + '（可点"重新授权"）', 'error');
+        }
+        this.loadConnections();
+    },
+
+    async openReauthDialog(id) {
+        const conn = this.connections.find(c => c.id === id);
+        if (!conn) return;
+        this._reauthConn = conn;
+        document.getElementById('reauth-title').textContent =
+            conn.type === 'baidu' ? `重新授权：${conn.name}` : `更新 Cookie：${conn.name}`;
+        const body = document.getElementById('reauth-body');
+
+        if (conn.type === 'baidu') {
+            let urls = { authorize_url: '', oauth_tool_url: '' };
+            try { urls = await this.api('GET', `/api/connections/${id}/auth-url`); } catch (e) {}
+            const stateText = conn.token_expired
+                ? '<span style="color:var(--color-error)">已过期</span>'
+                : (conn.token_expires_at ? '有效期至 ' + this.formatTime(conn.token_expires_at) : '有效期未知');
+            body.innerHTML = `
+                <div style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+                    当前令牌：${stateText}${conn.has_refresh_token ? '' : '（无 refresh_token，只能重新授权）'}
+                </div>
+                <div style="background:var(--accent-light);border:1px solid rgba(79,110,247,0.2);border-radius:var(--radius-md);padding:16px;margin-bottom:12px;">
+                    <div style="font-weight:600;margin-bottom:8px;">方式一：授权码（推荐）</div>
+                    <p style="font-size:13px;color:var(--text-secondary);line-height:1.7;margin-bottom:10px;">
+                        1. 点下面按钮，在百度登录并授权<br>
+                        2. 页面会显示一串授权码（code），复制它<br>
+                        3. 粘贴到输入框，点"确认更新"
+                    </p>
+                    <button class="btn btn-primary" onclick="window.open('${urls.authorize_url || urls.oauth_tool_url}', '_blank')">
+                        打开百度授权页面
+                    </button>
+                    <div class="form-group" style="margin-top:12px;margin-bottom:0;">
+                        <label>授权码 (code)</label>
+                        <input type="text" id="reauth-code" class="input" placeholder="在此粘贴授权码"
+                               style="font-family:monospace;font-size:13px;">
+                    </div>
+                </div>
+                <details>
+                    <summary style="cursor:pointer;font-size:13px;color:var(--text-secondary);">方式二：直接粘贴 refresh_token</summary>
+                    <div class="form-group" style="margin-top:10px;">
+                        <input type="text" id="reauth-refresh-token" class="input" placeholder="refresh_token"
+                               style="font-family:monospace;font-size:13px;">
+                    </div>
+                    <p style="font-size:12px;color:var(--text-muted);margin:0;">
+                        refresh_token 可从
+                        <a href="${urls.oauth_tool_url}" target="_blank" style="color:var(--accent)">AList OAuth 工具页</a>
+                        获取。
+                    </p>
+                </details>
+                <p style="font-size:12px;color:var(--text-muted);margin-top:12px;">
+                    重新授权只替换凭据，连接 ID、同步任务和增量状态都不受影响。
+                </p>`;
+        } else {
+            body.innerHTML = `
+                <p style="font-size:13px;color:var(--text-secondary);line-height:1.7;margin-bottom:12px;">
+                    在浏览器登录 <b>115 网盘</b> → 按 F12 → Application → Cookies，
+                    复制 <code>UID</code> / <code>CID</code> / <code>SEID</code> 三个值填入下方。
+                </p>
+                <div class="form-group"><label>UID</label>
+                    <input type="text" id="reauth-uid" class="input" style="font-family:monospace"></div>
+                <div class="form-group"><label>CID</label>
+                    <input type="text" id="reauth-cid" class="input" style="font-family:monospace"></div>
+                <div class="form-group"><label>SEID</label>
+                    <input type="text" id="reauth-seid" class="input" style="font-family:monospace"></div>
+                <p style="font-size:12px;color:var(--text-muted);">更新后连接 ID 与同步任务保持不变。</p>`;
+        }
+        this.openModal('modal-reauth');
+    },
+
+    async submitReauth() {
+        const conn = this._reauthConn;
+        if (!conn) return;
+        const payload = {};
+
+        if (conn.type === 'baidu') {
+            const code = (document.getElementById('reauth-code')?.value || '').trim();
+            const rt = (document.getElementById('reauth-refresh-token')?.value || '').trim();
+            if (code) payload.code = code;
+            else if (rt) payload.refresh_token = rt;
+            else { this.toast('请粘贴授权码或 refresh_token', 'warning'); return; }
+        } else {
+            const uid = (document.getElementById('reauth-uid')?.value || '').trim();
+            const cid = (document.getElementById('reauth-cid')?.value || '').trim();
+            const seid = (document.getElementById('reauth-seid')?.value || '').trim();
+            if (!uid || !cid || !seid) { this.toast('请填完整的 UID / CID / SEID', 'warning'); return; }
+            payload.cookies = { UID: uid, CID: cid, SEID: seid };
+        }
+
+        try {
+            await this.api('POST', `/api/connections/${conn.id}/reauth`, payload);
+            this.toast('凭据已更新，同步任务不受影响', 'success');
+            this.closeModal('modal-reauth');
+            this.loadConnections();
+        } catch (e) {
+            this.toast('更新失败: ' + e.message, 'error');
+        }
     },
 
     async deleteConnection(id) {

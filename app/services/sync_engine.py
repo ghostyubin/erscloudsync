@@ -142,7 +142,8 @@ class SyncEngine:
             if not connection:
                 raise RuntimeError("Connection not found")
 
-            provider = get_provider(connection["type"], connection["credentials"])
+            provider = get_provider(connection["type"], connection["credentials"],
+                                    conn_id=connection["id"])
             if not await provider.test_connection():
                 raise RuntimeError(f"Connection to {connection['name']} failed")
 

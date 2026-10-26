@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import os
 import time
 import math
@@ -19,6 +20,8 @@ from app.providers.base import CloudProvider, FileInfo, AuthResult, ProgressRead
 from app.config import BAIDU_APP_KEY, BAIDU_APP_SECRET, BAIDU_REDIRECT_URI, BAIDU_DEFAULT_APP_KEY, BAIDU_DEFAULT_APP_SECRET, BAIDU_OAUTH_TOOL_URL, UPLOAD_CONCURRENCY
 from app.services.retry import retry_async
 from app import database as db
+
+logger = logging.getLogger(__name__)
 
 
 class _BlockPayload(aiohttp.Payload):
@@ -95,6 +98,11 @@ class BaiduProvider(CloudProvider):
         self.refresh_token = credentials.get("refresh_token", "")
         self.expires_at = credentials.get("expires_at", 0)
         self._session: Optional[aiohttp.ClientSession] = None
+        # Set by the caller (API / sync engine) so a token refreshed during a
+        # request is written back to the database instead of only living in
+        # memory. Without this, every new provider object reloads the stale
+        # token from the DB and the refresh is lost.
+        self.conn_id: Optional[int] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -129,8 +137,17 @@ class BaiduProvider(CloudProvider):
         }
         async with aiohttp.ClientSession() as session:
             async with session.post(OAUTH_TOKEN_URL, params=params) as resp:
-                data = await resp.json()
+                data = await resp.json(content_type=None)
                 if "access_token" not in data:
+                    err = str(data.get("error", ""))
+                    desc = str(data.get("error_description", "") or "")
+                    low = desc.lower()
+                    if err in ("invalid_grant", "invalid_request", "invalid_client"):
+                        raise RuntimeError("refresh_token 已失效，需要重新授权")
+                    if "security policy" in low or "try again later" in low:
+                        raise RuntimeError(
+                            "百度风控拦截（Trigger security policy），请稍后重试；"
+                            "若持续失败请用授权码重新授权")
                     raise RuntimeError(f"Token refresh failed: {data}")
                 self.access_token = data["access_token"]
                 self.refresh_token = data.get("refresh_token", self.refresh_token)
@@ -138,40 +155,86 @@ class BaiduProvider(CloudProvider):
                 self.credentials["access_token"] = self.access_token
                 self.credentials["refresh_token"] = self.refresh_token
                 self.credentials["expires_at"] = self.expires_at
+                logger.info("Baidu token refreshed (conn_id=%s, expires_at=%s)",
+                            self.conn_id, int(self.expires_at))
+                await self.persist_credentials()
+
+    async def persist_credentials(self):
+        """Write current credentials back to the database (best effort)."""
+        if not self.conn_id:
+            return
+        try:
+            await db.db_update_connection(
+                self.conn_id, credentials=dict(self.credentials))
+        except Exception as exc:  # never let a DB hiccup break a sync
+            logger.warning("Failed to persist refreshed credentials: %s", exc)
+
+    async def force_refresh(self) -> dict:
+        """Force a refresh now, ignoring ``expires_at``.
+
+        Used by the "刷新令牌" button so the user can renew a token before it
+        expires, or recover a connection whose stored expiry looks stale.
+        """
+        if not self.refresh_token:
+            raise RuntimeError("该连接没有 refresh_token，无法自动刷新，请重新授权")
+        await self._refresh_token()
+        return dict(self.credentials)
 
     async def _api_get(self, path: str, params: dict = None) -> dict:
-        """Make a GET request to the Pan API."""
+        """Make a GET request to the Pan API.
+
+        errno=-6 means "access token invalid/expired". We try exactly one
+        forced refresh there, because ``expires_at`` in the DB can be stale
+        (or 0 for manually pasted tokens) and would otherwise make the
+        connection look permanently dead.
+        """
         await self._ensure_token()
-        params = params or {}
+        params = dict(params or {})
         params["access_token"] = self.access_token
         session = await self._get_session()
         url = f"{PAN_API_BASE}{path}"
-        async with session.get(url, params=params) as resp:
-            text = await resp.text()
+        for attempt in (1, 2):
+            async with session.get(url, params=params) as resp:
+                text = await resp.text()
             try:
                 data = json.loads(text)
             except json.JSONDecodeError:
                 raise RuntimeError(f"API returned non-JSON: {text[:500]}")
-            if data.get("errno"):
-                raise RuntimeError(f"Baidu API error {data['errno']}: {data.get('errmsg', '')}")
+            errno = data.get("errno")
+            if errno and errno == -6 and attempt == 1 and self.refresh_token:
+                logger.info("Baidu token rejected (errno -6), forcing refresh")
+                await self._refresh_token()
+                params["access_token"] = self.access_token
+                continue
+            if errno:
+                raise RuntimeError(f"Baidu API error {errno}: {data.get('errmsg', '')}")
             return data
+        raise RuntimeError("Baidu API error: token still invalid after refresh")
 
     async def _api_post(self, path: str, params: dict = None, data=None) -> dict:
-        """Make a POST request to the Pan API."""
+        """Make a POST request to the Pan API (same errno -6 handling as GET)."""
         await self._ensure_token()
-        params = params or {}
+        params = dict(params or {})
         params["access_token"] = self.access_token
         session = await self._get_session()
         url = f"{PAN_API_BASE}{path}"
-        async with session.post(url, params=params, data=data) as resp:
-            text = await resp.text()
+        for attempt in (1, 2):
+            async with session.post(url, params=params, data=data) as resp:
+                text = await resp.text()
             try:
                 result = json.loads(text)
             except json.JSONDecodeError:
                 raise RuntimeError(f"API returned non-JSON: {text[:500]}")
-            if result.get("errno"):
-                raise RuntimeError(f"Baidu API error {result['errno']}: {result.get('errmsg', '')}")
+            errno = result.get("errno")
+            if errno and errno == -6 and attempt == 1 and self.refresh_token:
+                logger.info("Baidu token rejected (errno -6), forcing refresh")
+                await self._refresh_token()
+                params["access_token"] = self.access_token
+                continue
+            if errno:
+                raise RuntimeError(f"Baidu API error {errno}: {result.get('errmsg', '')}")
             return result
+        raise RuntimeError("Baidu API error: token still invalid after refresh")
 
     async def test_connection(self) -> bool:
         """Test if the connection is valid by getting user info."""
