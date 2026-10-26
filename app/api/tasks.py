@@ -97,11 +97,11 @@ async def list_tasks():
                 "processed_files": progress.processed_files,
                 "failed_files": progress.failed_files,
                 "skipped_files": progress.skipped_files,
-            "transferred_bytes": progress.transferred_bytes,
-            "speed": progress.speed,
-            "active_transfers": _transfers_with_speed(progress),
-        }
-    result.append(task)
+                "transferred_bytes": progress.transferred_bytes,
+                "speed": progress.speed,
+                "active_transfers": _transfers_with_speed(progress),
+            }
+        result.append(task)
     return {"tasks": result}
 
 
@@ -189,9 +189,9 @@ async def sync_now(task_id: int):
     if SyncEngine.is_running(task_id):
         raise HTTPException(409, "Task is already running")
 
-    # Run sync in background
-    import asyncio
-    asyncio.create_task(SyncEngine.sync_task(task_id))
+    # Run sync in background (SyncEngine.spawn keeps a strong reference so the
+    # task cannot be garbage collected mid-run)
+    SyncEngine.spawn(task_id)
     return {"status": "syncing", "task_id": task_id}
 
 

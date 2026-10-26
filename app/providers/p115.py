@@ -356,15 +356,35 @@ class Provider115(CloudProvider):
         # Download file
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
         downloaded = 0
+        # Same reasoning as the Baidu provider: a truncated file at the final
+        # path would later be treated as a new local file and pushed over the
+        # intact cloud copy.
+        tmp_path = local_path + ".part"
         async with session.get(download_url) as resp:
             if resp.status != 200:
                 raise RuntimeError(f"Download failed: HTTP {resp.status}")
-            with open(local_path, "wb") as f:
-                async for chunk in resp.content.iter_chunked(DOWNLOAD_CHUNK_SIZE):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if progress_callback:
-                        await progress_callback(downloaded, file_size)
+            try:
+                with open(tmp_path, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(DOWNLOAD_CHUNK_SIZE):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback:
+                            await progress_callback(downloaded, file_size)
+            except BaseException:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+                raise
+            if file_size and downloaded != file_size:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    f"Download incomplete for {remote_path}: "
+                    f"{downloaded}/{file_size} bytes")
+            os.replace(tmp_path, local_path)
         return True
 
     async def delete_file(self, remote_path: str) -> bool:

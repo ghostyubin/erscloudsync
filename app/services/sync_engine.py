@@ -20,6 +20,18 @@ from app.config import LOCAL_SYNC_ROOT, DOWNLOAD_DIR, SYNC_CONCURRENCY
 from app.services.retry import retry_async
 from app.utils.helpers import get_provider
 
+# Filenames that are never worth syncing, regardless of what the task filters
+# say. macOS drops .DS_Store / ._* on every folder it browses over SMB, Office
+# leaves ~$ lock files behind, and browsers/our own downloader leave .part and
+# .tmp files around. Pushing those to the cloud is pure noise and, in the case
+# of .part, would upload a half-downloaded file.
+DEFAULT_EXCLUDE_PATTERNS = (
+    ".DS_Store", "._*", ".Spotlight-V100", ".Trashes", ".fseventsd",
+    "Thumbs.db", "desktop.ini", "ehthumbs.db",
+    "~$*", ".~lock.*",
+    "*.tmp", "*.part", "*.crdownload", "*.partial",
+)
+
 
 class SyncAction(str, Enum):
     UPLOAD = "upload"
@@ -86,6 +98,18 @@ class SyncEngine:
     # on the frontend's polling delta (frontend state is unreliable when
     # multiple transfers of identical size are uploaded concurrently).
     _transfer_samples: dict[int, dict[int, tuple]] = {}
+    # Strong references to fire-and-forget sync tasks. asyncio only keeps a
+    # weak reference to a task, so without this a background sync can be
+    # garbage collected mid-execution.
+    _bg_tasks: set = set()
+
+    @classmethod
+    def spawn(cls, task_id: int) -> "asyncio.Task":
+        """Start a sync in the background, keeping a reference to the task."""
+        t = asyncio.create_task(cls.sync_task(task_id))
+        cls._bg_tasks.add(t)
+        t.add_done_callback(cls._bg_tasks.discard)
+        return t
 
     @classmethod
     def get_progress(cls, task_id: int) -> Optional[SyncProgress]:
@@ -427,7 +451,15 @@ class SyncEngine:
 
             try:
                 if op.action == SyncAction.UPLOAD:
-                    file_size = os.path.getsize(op.local_path)
+                    try:
+                        file_size = os.path.getsize(op.local_path)
+                    except OSError:
+                        # The file vanished between the scan and now (moved,
+                        # deleted, or a temp file that got cleaned up).
+                        progress.skipped_files += 1
+                        await db.db_add_log(task_id, "skip", op.remote_path,
+                            "Skipped (file no longer exists)")
+                        return "skipped"
                     transfer_id = progress._next_transfer_id
                     progress._next_transfer_id += 1
                     transfer = ActiveTransfer(
@@ -606,7 +638,11 @@ class SyncEngine:
                     active_total = sum(t.transferred for t in progress.active_transfers.values())
                     total_now = progress.transferred_bytes + active_total
                     delta = total_now - progress._speed_last_bytes
-                    progress.speed = delta / dt if dt > 0 else 0
+                    # A file finishing moves its bytes from active to
+                    # transferred_bytes a moment later, which can make the
+                    # aggregate dip below the previous sample. Never show a
+                    # negative rate.
+                    progress.speed = max(0.0, delta / dt) if dt > 0 else 0
                     progress._speed_last_time = now
                     progress._speed_last_bytes = total_now
             elif progress._speed_last_time == 0:
@@ -627,6 +663,8 @@ class SyncEngine:
                 rel_path = "/" + rel_path.replace(os.sep, "/")
 
                 # Apply filters
+                if any(fnmatch.fnmatch(filename, pat) for pat in DEFAULT_EXCLUDE_PATTERNS):
+                    continue
                 if exclude and any(fnmatch.fnmatch(filename, pat) for pat in exclude):
                     continue
                 if include and not any(fnmatch.fnmatch(filename, pat) for pat in include):
@@ -664,13 +702,27 @@ class SyncEngine:
             remote_file = remote_map.get(rel_path)
             remote_md5 = (getattr(remote_file, "md5", "") or "") if remote_file else ""
             if local_file and remote_file:
+                size, mtime = local_file.size, local_file.modify_time
+                # The maps are pre-transfer snapshots, so a file that was
+                # (re)downloaded during this cycle still carries its old
+                # size/mtime here. Re-stat it, otherwise the next run thinks
+                # the local copy changed and uploads it again.
+                try:
+                    st = os.stat(cls._join_local(local_base, rel_path))
+                    size, mtime = st.st_size, st.st_mtime
+                except OSError:
+                    pass
                 await db.db_upsert_sync_state(
-                    task_id, rel_path, local_file.size, local_file.modify_time,
-                    remote_md5, "both")
+                    task_id, rel_path, size, mtime, remote_md5, "both")
             elif local_file:
+                size, mtime = local_file.size, local_file.modify_time
+                try:
+                    st = os.stat(cls._join_local(local_base, rel_path))
+                    size, mtime = st.st_size, st.st_mtime
+                except OSError:
+                    pass
                 await db.db_upsert_sync_state(
-                    task_id, rel_path, local_file.size, local_file.modify_time,
-                    "", "local")
+                    task_id, rel_path, size, mtime, "", "local")
             elif remote_file:
                 await db.db_upsert_sync_state(
                     task_id, rel_path, remote_file.size, remote_file.modify_time,

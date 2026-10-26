@@ -25,7 +25,7 @@ class FileChangeHandler(FileSystemEventHandler):
         self.task_id = task_id
         self.local_path = local_path
         self.debounce_seconds = debounce_seconds
-        self._last_trigger = 0
+        self._last_trigger = 0.0
         self._debounce_task: Optional[asyncio.Task] = None
         # Capture the main event loop here (runs in main thread).
         # watchdog's Observer runs callbacks in a separate thread where
@@ -35,27 +35,47 @@ class FileChangeHandler(FileSystemEventHandler):
     def on_any_event(self, event):
         if event.is_directory:
             return
-        now = time.time()
-        self._last_trigger = now
-        # Cancel any pending debounce task
-        if self._debounce_task and not self._debounce_task.done():
-            self._debounce_task.cancel()
-        # Schedule on the main event loop thread-safely
-        # (on_any_event is called from a watchdog observer thread)
+        self._last_trigger = time.time()
+        # Called from a watchdog observer thread -> hop onto the event loop.
         self._loop.call_soon_threadsafe(self._schedule_debounced_sync)
 
     def _schedule_debounced_sync(self):
-        """Create the debounce task on the event loop thread."""
+        """Runs on the event loop thread.
+
+        At most one debounce task exists. We deliberately do NOT cancel it:
+        copying a large folder fires events every second, and cancelling the
+        task would abort the sync it already started, so the transfer would
+        restart forever and never finish. The debounce loop below re-checks
+        the last event time instead, which coalesces the burst just as well.
+        """
+        if self._debounce_task and not self._debounce_task.done():
+            return
         self._debounce_task = self._loop.create_task(self._debounced_sync())
 
     async def _debounced_sync(self):
         try:
-            await asyncio.sleep(self.debounce_seconds)
-            if time.time() - self._last_trigger >= self.debounce_seconds - 1:
-                logger.info(f"File change detected, triggering sync for task {self.task_id}")
-                await SyncEngine.sync_task(self.task_id)
+            # Wait until the burst of file events settles down.
+            while time.time() - self._last_trigger < self.debounce_seconds - 1:
+                await asyncio.sleep(1)
+            # A sync may already be running for this task; let it finish so
+            # the changes made meanwhile are picked up by the next cycle
+            # instead of racing with it.
+            while SyncEngine.is_running(self.task_id):
+                await asyncio.sleep(2)
+                # Changes arrived while waiting: restart the settle timer.
+                while time.time() - self._last_trigger < self.debounce_seconds - 1:
+                    await asyncio.sleep(1)
+            logger.info(f"File change detected, triggering sync for task {self.task_id}")
+            await SyncEngine.sync_task(self.task_id)
         except asyncio.CancelledError:
-            pass
+            raise
+        except Exception as e:
+            logger.error(f"Realtime sync for task {self.task_id} failed: {e}")
+
+    def cancel(self):
+        """Stop the debounce loop (called when the task is unscheduled)."""
+        if self._debounce_task and not self._debounce_task.done():
+            self._debounce_task.cancel()
 
 
 class SyncScheduler:
@@ -77,6 +97,11 @@ class SyncScheduler:
         # Load all tasks and schedule them
         tasks = await db.db_list_tasks()
         for task in tasks:
+            # Respect the paused state: without this, every container restart
+            # silently re-enables tasks the user had explicitly paused.
+            if task.get("status") == "paused":
+                logger.info(f"Task {task['id']} is paused, not scheduling")
+                continue
             await self.schedule_task(task)
 
         logger.info(f"Scheduler started with {len(tasks)} tasks")
@@ -85,7 +110,12 @@ class SyncScheduler:
         """Stop the scheduler and all observers."""
         for observer in self._observers.values():
             observer.stop()
-            observer.join()
+            # Never join without a timeout: a wedged observer thread would
+            # otherwise block application shutdown forever.
+            try:
+                observer.join(timeout=2)
+            except Exception:
+                pass
         self._observers.clear()
         self._handlers.clear()
         if self._started:
@@ -126,7 +156,7 @@ class SyncScheduler:
                 # Run initial sync in background — don't block app startup.
                 # If we await here, uvicorn stays stuck on "Waiting for
                 # application startup" and never starts listening on the port.
-                asyncio.create_task(SyncEngine.sync_task(task_id))
+                SyncEngine.spawn(task_id)
 
     @staticmethod
     def _resolve_local_base(local_path: str) -> str:
@@ -162,7 +192,12 @@ class SyncScheduler:
                 pass
             del self._observers[task_id]
         if task_id in self._handlers:
+            self._handlers[task_id].cancel()
             del self._handlers[task_id]
+        # A sync may still be running for this task; ask it to wind down
+        # instead of letting it continue against an unscheduled task.
+        if SyncEngine.is_running(task_id):
+            SyncEngine.request_stop(task_id)
 
 
 # Global scheduler instance

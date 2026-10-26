@@ -649,6 +649,11 @@ class BaiduProvider(CloudProvider):
         }
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
         downloaded = 0
+        # Write to a sibling .part file and rename when complete. A half
+        # written file left at the final path would look like a brand new
+        # local file on the next cycle and get uploaded over the intact
+        # cloud copy (that is how a dropped connection turns into data loss).
+        tmp_path = local_path + ".part"
         async with session.get(
             f"{PCS_API_BASE}/file", params=params, allow_redirects=True
         ) as resp:
@@ -658,12 +663,30 @@ class BaiduProvider(CloudProvider):
             # Get file size from Content-Length header
             content_length = resp.headers.get("Content-Length", "0")
             file_size = int(content_length) if content_length.isdigit() else 0
-            with open(local_path, "wb") as f:
-                async for chunk in resp.content.iter_chunked(DOWNLOAD_CHUNK_SIZE):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if progress_callback:
-                        await progress_callback(downloaded, file_size)
+            try:
+                with open(tmp_path, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(DOWNLOAD_CHUNK_SIZE):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback:
+                            await progress_callback(downloaded, file_size)
+            except BaseException:
+                # Network error, timeout or a user cancel: never leave the
+                # partial file behind under its real name.
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+                raise
+            if file_size and downloaded != file_size:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    f"Download incomplete for {remote_path}: "
+                    f"{downloaded}/{file_size} bytes")
+            os.replace(tmp_path, local_path)
         return True
 
     async def delete_file(self, remote_path: str) -> bool:

@@ -22,6 +22,40 @@ logger = logging.getLogger(__name__)
 # In-memory progress tracking: dl_id -> {transferred, total, speed, current_file, ...}
 _progress: dict[int, dict] = {}
 _running: set[int] = set()
+# Strong references to background download tasks, otherwise asyncio may
+# garbage collect one mid-run (a task is only weakly referenced).
+_bg_tasks: set = set()
+
+
+def _dedupe_local_path(path: str, expected_size: int = 0) -> str:
+    """Pick a local path that will not clobber an unrelated file.
+
+    A single-file download lands in /downloads/<basename>, so two cloud files
+    with the same name in different folders (camera counter reset, exports,
+    etc.) would silently overwrite each other. If the existing file has the
+    same size we assume it is the same file being downloaded again and keep
+    the name; otherwise suffix " (2)", " (3)" ... to preserve both.
+    """
+    if not os.path.exists(path):
+        return path
+    try:
+        if expected_size and os.path.getsize(path) == expected_size:
+            return path
+    except OSError:
+        pass
+    root, ext = os.path.splitext(path)
+    for i in range(2, 1000):
+        candidate = f"{root} ({i}){ext}"
+        if not os.path.exists(candidate):
+            return candidate
+    return f"{root} ({int(time.time())}){ext}"
+
+
+def _spawn(coro):
+    t = asyncio.create_task(coro)
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
+    return t
 
 
 class CreateDownloadRequest(BaseModel):
@@ -61,7 +95,15 @@ async def create_download(req: CreateDownloadRequest):
         raise HTTPException(404, "Connection not found")
 
     file_name = req.file_name or os.path.basename(req.remote_path.rstrip("/"))
-    local_path = str(DOWNLOAD_DIR / file_name)
+    if req.is_dir:
+        local_path = str(DOWNLOAD_DIR / file_name)
+    else:
+        # Single files keep only the basename, so guard against same-name
+        # collisions across different cloud folders.
+        local_path = _dedupe_local_path(
+            str(DOWNLOAD_DIR / file_name), req.file_size)
+        # Keep the displayed name in sync when a suffix was added.
+        file_name = os.path.basename(local_path)
 
     dl_id = await db.db_create_download(
         connection_id=req.connection_id,
@@ -75,7 +117,7 @@ async def create_download(req: CreateDownloadRequest):
     )
 
     # Start download in background
-    asyncio.create_task(_execute_download(dl_id, conn, req.remote_path, req.is_dir, local_path))
+    _spawn(_execute_download(dl_id, conn, req.remote_path, req.is_dir, local_path))
     return {"id": dl_id, "status": "pending"}
 
 
@@ -103,7 +145,8 @@ async def _execute_download(dl_id: int, conn: dict, remote_path: str,
     _running.add(dl_id)
     await db.db_update_download(dl_id, status="downloading")
 
-    provider = get_provider(conn["type"], conn["credentials"])
+    provider = get_provider(conn["type"], conn["credentials"],
+                            conn_id=conn.get("id"))
     try:
         if is_dir:
             await _download_folder(dl_id, provider, remote_path, local_path)

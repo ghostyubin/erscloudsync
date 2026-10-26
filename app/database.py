@@ -122,6 +122,12 @@ CREATE INDEX IF NOT EXISTS idx_downloads_created ON downloads(created_at);
 async def init_db():
     """Initialize the database schema."""
     async with aiosqlite.connect(str(DB_PATH)) as db:
+        # WAL is persistent in the database file, so every later connection
+        # benefits. Without it the frontend polling /api/tasks while a sync
+        # writes logs serialises readers against writers and can surface as
+        # "database is locked" on the NAS.
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
         await db.executescript(SCHEMA)
         await db.commit()
 
