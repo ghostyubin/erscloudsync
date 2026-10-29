@@ -47,6 +47,11 @@ URL_KEY = "notify_url"
 TOKEN_KEY = "notify_key"
 QUIET_KEY = "notify_quiet_seconds"
 INSECURE_KEY = "notify_insecure"
+# 设备名称：多台机器都往同一个网关推的时候，靠这一行区分是谁发的
+DEVICE_KEY = "device_name"
+
+# 没填设备名时的兜底（以前的通知里没有设备名，旧配置升级上来不会空一行）
+DEVICE_FALLBACK = "BauduSync"
 
 QUIET_MIN = 10
 QUIET_MAX = 3600
@@ -133,6 +138,7 @@ class NotifyConfig:
     token: str = ""
     quiet: int = NOTIFY_DEFAULT_QUIET
     insecure: bool = False
+    device: str = DEVICE_FALLBACK
 
     @property
     def configured(self) -> bool:
@@ -195,7 +201,7 @@ def _clamp_quiet(raw, default: int) -> int:
 
 async def load_config() -> NotifyConfig:
     """从 settings 表读通知配置，库里没有值就用环境变量/内置默认。"""
-    keys = (ENABLED_KEY, URL_KEY, TOKEN_KEY, QUIET_KEY, INSECURE_KEY)
+    keys = (ENABLED_KEY, URL_KEY, TOKEN_KEY, QUIET_KEY, INSECURE_KEY, DEVICE_KEY)
     raw = {}
     for key in keys:
         try:
@@ -217,6 +223,7 @@ async def load_config() -> NotifyConfig:
         token=(token or "").strip(),
         quiet=_clamp_quiet(raw.get(QUIET_KEY), NOTIFY_DEFAULT_QUIET),
         insecure=_as_bool(raw.get(INSECURE_KEY)),
+        device=(raw.get(DEVICE_KEY) or "").strip() or DEVICE_FALLBACK,
     )
 
 
@@ -230,6 +237,8 @@ class FolderBatch:
     key: str
     label: str
     task_name: str
+    # 设备名由 _send 在发送前从配置里补上（record 是同步方法，读不到异步配置）
+    device: str = ""
     uploads: int = 0
     downloads: int = 0
     deletes: int = 0
@@ -255,13 +264,21 @@ class FolderBatch:
     def moved(self) -> int:
         return self.uploads + self.downloads + self.deletes
 
+    def status_line(self) -> str:
+        """状态行，正文第一行。标题被设备名占了，状态就落在这里。"""
+        if self.error:
+            return "❌ 同步失败"
+        if self.failed:
+            return f"⚠️ {self.failed} 个文件失败"
+        return "✅ 传输完成"
+
     def body(self) -> str:
-        """正文：目录 / 文件数·文件夹数 / 大小 / 用时，出错再补失败清单和原因。
+        """正文：状态 / 目录 / 文件数·文件夹数 / 大小 / 用时·日期，出错再补失败清单和原因。
 
         纯文本（msg_type=text）—— 微信里看企业微信消息，markdown 会显示
         「不支持的消息类型」。排版只靠换行和间隔号，不依赖任何标记语法。
         """
-        lines: list[str] = [f"目录 {self.label}"]
+        lines: list[str] = [self.status_line(), f"目录 {self.label}"]
 
         # ---- 这一波动了多少：文件数 + 文件夹数 ----
         total = self.moved + self.failed
@@ -299,12 +316,13 @@ class FolderBatch:
         if self.error:
             lines.append(f"原因：{self.error}")
 
-        # ---- 最后一行：多久、几点 ----
+        # ---- 最后一行：多久、哪天几点 ----
         # 整轮扫挂（一个文件都没动）时不给「用时」，那会让人以为传了一会儿才失败
         tail = []
         if (self.moved or self.failed) and self.first_at and self.last_at > self.first_at:
             tail.append(f"用时 {fmt_duration(self.last_at - self.first_at)}")
-        tail.append(datetime.now().strftime("%H:%M"))
+        # 带年月日：多条通知堆在一起时，只看 21:16 分不清是哪天的
+        tail.append(datetime.now().strftime("%Y-%m-%d %H:%M"))
         lines.append(" · ".join(tail))
 
         if self.error or self.failed:
@@ -312,12 +330,12 @@ class FolderBatch:
         return "\n".join(lines)
 
     def title(self) -> str:
-        """标题 = 状态 + 文件夹。手机上第一条就看清是哪个文件夹、成没成。"""
-        if self.error:
-            return f"❌ 同步失败 · {self.label}"
-        if self.failed:
-            return f"⚠️ {self.failed} 个失败 · {self.label}"
-        return f"✅ 传输完成 · {self.label}"
+        """标题 = 同步设备。多台机器推同一个网关时，第一行就知道是谁发的。
+
+        Heimdallr 发出去的内容是 ``title + "\\n" + body``，所以标题就是
+        手机上的第一行；状态行放进正文第一行。
+        """
+        return f"同步设备：{(self.device or '').strip() or DEVICE_FALLBACK}"
 
 
 # --------------------------------------------------------------------------
@@ -542,6 +560,8 @@ class Notifier:
         endpoint = cfg.endpoint
         if not endpoint:
             return False, "通知地址为空"
+        # 桶是同步方法里建的，拿不到异步配置，发送前补上设备名
+        batch.device = cfg.device
         payload = {
             "key": cfg.token,
             "title": batch.title(),
@@ -568,17 +588,19 @@ class Notifier:
         except Exception as exc:  # noqa: BLE001
             return False, f"发送异常：{exc}"
 
-    async def send_test(self, title: str = "BauduSync 测试通知",
-                        body: str = "如果你在手机上看到这条消息，说明通知已经能正常送达。",
+    async def send_test(self, title: str = "",
+                        body: str = "✅ 测试通知\n如果你在手机上看到这条消息，说明通知已经能正常送达。",
                         ) -> dict:
-        """测试发送：直接用当前配置发一条，不经过聚合队列。"""
+        """测试发送：直接用当前配置发一条，不经过聚合队列。
+
+        标题留空就用「同步设备：xxx」，和真实通知的第一行保持一致 ——
+        测试消息本身就是排版的一部分，不能和正式推送长得不一样。
+        """
         cfg = await self.config(force=True)
         if not cfg.configured:
             return {"ok": False, "message": "请先填写网关地址和分组 Token"}
-        batch = FolderBatch(key="test", label=title, task_name="BauduSync",
-                            uploads=1, bytes_moved=0,
-                            first_at=time.time(), last_at=time.time(),
-                            has_activity=True)
+        if not title:
+            title = f"同步设备：{cfg.device}"
         endpoint = cfg.endpoint
         payload = {"key": cfg.token, "title": title, "body": body,
                    "msg_type": "text"}

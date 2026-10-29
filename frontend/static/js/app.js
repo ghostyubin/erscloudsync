@@ -1299,11 +1299,13 @@ const App = {
        留空表示「不修改」，否则保存时会把真实 token 覆盖成星号。 */
     _applyNotifySettings(n, limits) {
         const el = id => document.getElementById(id);
+        const device = el('setting-notify-device');
         const url = el('setting-notify-url');
         const token = el('setting-notify-token');
         const quiet = el('setting-notify-quiet');
         const enabled = el('setting-notify-enabled');
         const insecure = el('setting-notify-insecure');
+        if (device) device.value = n.device || '';
         if (url) url.value = n.url || '';
         if (token) {
             token.value = '';
@@ -1351,12 +1353,14 @@ const App = {
 
         const enabledEl = el('setting-notify-enabled');
         const insecureEl = el('setting-notify-insecure');
+        const deviceEl = el('setting-notify-device');
         const payload = {
             notify: {
                 enabled: !!(enabledEl && enabledEl.checked),
                 url: url,
                 quiet: quiet,
                 insecure: !!(insecureEl && insecureEl.checked),
+                device: (deviceEl ? deviceEl.value : '').trim(),
             }
         };
         // 空 token = 不修改：界面上是打码值，照原样提交会把真 token 写坏

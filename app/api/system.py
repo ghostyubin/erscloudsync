@@ -10,8 +10,8 @@ from pydantic import BaseModel
 from app.config import LOCAL_SYNC_ROOT, LOCAL_ROOTS, DOWNLOAD_DIR, DATA_DIR, SYNC_CONCURRENCY
 from app import database as db
 from app.services.notify import (
-    ENABLED_KEY, INSECURE_KEY, QUIET_KEY, QUIET_MAX, QUIET_MIN, TOKEN_KEY,
-    URL_KEY, load_config, notifier,
+    DEVICE_KEY, ENABLED_KEY, INSECURE_KEY, QUIET_KEY, QUIET_MAX, QUIET_MIN,
+    TOKEN_KEY, URL_KEY, load_config, notifier,
 )
 from app.services.sync_engine import (
     CONCURRENCY_MAX, CONCURRENCY_MIN, CONCURRENCY_SETTING_KEY, SyncEngine,
@@ -29,6 +29,8 @@ class NotifySettings(BaseModel):
     token: Optional[str] = None
     quiet: Optional[int] = None
     insecure: Optional[bool] = None
+    # 设备名称：多台机器推同一个网关时，靠这条区分是谁发的
+    device: Optional[str] = None
 
 
 class RuntimeSettings(BaseModel):
@@ -52,6 +54,7 @@ async def _notify_payload() -> dict:
         "url": cfg.url,
         "quiet": cfg.quiet,
         "insecure": cfg.insecure,
+        "device": cfg.device,
         "token_set": bool(cfg.token),
         "token_masked": _mask(cfg.token),
         "configured": cfg.configured,
@@ -107,6 +110,9 @@ async def update_settings(req: RuntimeSettings):
             await db.db_set_setting(QUIET_KEY, str(quiet))
         if n.insecure is not None:
             await db.db_set_setting(INSECURE_KEY, "1" if n.insecure else "0")
+        # 设备名允许清空（清空后回落到 DEVICE_FALLBACK），所以不用 "if n.device" 守卫
+        if n.device is not None:
+            await db.db_set_setting(DEVICE_KEY, n.device.strip()[:64])
         notifier.invalidate_config()
         result["notify"] = await _notify_payload()
 
