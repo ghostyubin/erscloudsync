@@ -1277,7 +1277,50 @@ const App = {
             if (el('settings-info-active'))   el('settings-info-active').textContent   = String(info.active_tasks ?? '—');
             if (el('settings-info-downloads'))el('settings-info-downloads').textContent= String(info.active_downloads ?? '—');
         } catch (e) { /* system info optional */ }
+
+        // Runtime settings (currently just the per-task upload concurrency)
+        try {
+            const s = await this.api('GET', '/api/system/settings');
+            const input = document.getElementById('setting-sync-concurrency');
+            if (input && s) {
+                const lim = (s.limits && s.limits.sync_concurrency) || { min: 1, max: 16 };
+                const dflt = (s.defaults && s.defaults.sync_concurrency);
+                input.min = lim.min;
+                input.max = lim.max;
+                input.value = s.sync_concurrency;
+                input.dataset.default = dflt == null ? '' : String(dflt);
+            }
+        } catch (e) { /* settings optional */ }
         await connPromise;
+    },
+
+    async saveSyncConcurrency() {
+        const input = document.getElementById('setting-sync-concurrency');
+        const btn = document.getElementById('setting-sync-concurrency-save');
+        if (!input) return;
+        // Accept only whole numbers inside the range the API advertises.
+        const min = parseInt(input.min, 10) || 1;
+        const max = parseInt(input.max, 10) || 16;
+        const value = parseInt(input.value, 10);
+        if (!Number.isFinite(value) || value < min || value > max) {
+            this.toast(`请输入 ${min}–${max} 之间的整数`, 'error');
+            input.focus();
+            return;
+        }
+        if (btn) btn.disabled = true;
+        try {
+            const res = await this.api('PUT', '/api/system/settings', { sync_concurrency: value });
+            input.value = res.sync_concurrency;
+            this.toast(`并发上传数量已设为 ${res.sync_concurrency}，下一轮同步生效`, 'success');
+            if (btn) {
+                btn.classList.add('saved');
+                setTimeout(() => btn.classList.remove('saved'), 1200);
+            }
+        } catch (e) {
+            this.toast('保存失败: ' + e.message, 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
     },
 
     loadAboutView() {

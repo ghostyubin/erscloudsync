@@ -2417,6 +2417,82 @@ details[open] summary::before { transform: rotate(90deg); }
   font-weight: 300;
 }
 
+/* Inline setting rows (label + description on the left, control on the
+   right). Not clickable as a whole, so unlike .settings-card it has no
+   pointer cursor or hover lift. */
+.settings-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 12px;
+  padding: 16px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+
+.settings-field-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.settings-field-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 3px;
+}
+
+.settings-field-desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.settings-field-desc strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.settings-field-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.settings-number {
+  width: 84px;
+  padding: 8px 10px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-save {
+  padding: 8px 16px;
+  font-size: 13px;
+}
+
+/* Brief confirmation after a successful save. */
+.settings-save.saved {
+  background: var(--color-success);
+}
+
+@media (max-width: 640px) {
+  .settings-field {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .settings-field-control {
+    justify-content: flex-end;
+  }
+}
+
 .settings-info-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));

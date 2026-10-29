@@ -27,6 +27,28 @@ from app.utils.helpers import get_provider
 # leaves ~$ lock files behind, and browsers/our own downloader leave .part and
 # .tmp files around. Pushing those to the cloud is pure noise and, in the case
 # of .part, would upload a half-downloaded file.
+# How many files one task transfers at the same time. The value lives in the
+# settings table so the UI can change it without a restart; the environment
+# variable only supplies the default for a fresh install.
+CONCURRENCY_SETTING_KEY = "sync_concurrency"
+CONCURRENCY_MIN = 1
+CONCURRENCY_MAX = 16
+
+
+def parse_concurrency(raw, fallback: int = None) -> int:
+    """Turn whatever is stored in the settings table into a usable number.
+
+    Anything unparsable or out of range falls back to the configured default
+    instead of raising: a bad row must never stop every sync from running.
+    """
+    default = SYNC_CONCURRENCY if fallback is None else fallback
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return max(CONCURRENCY_MIN, min(CONCURRENCY_MAX, default))
+    return max(CONCURRENCY_MIN, min(CONCURRENCY_MAX, value))
+
+
 DEFAULT_EXCLUDE_PATTERNS = (
     ".DS_Store", "._*", ".Spotlight-V100", ".Trashes", ".fseventsd",
     "Thumbs.db", "desktop.ini", "ehthumbs.db",
@@ -216,6 +238,16 @@ class SyncEngine:
         return task_id in cls._running_tasks
 
     @classmethod
+    async def get_concurrency(cls) -> int:
+        """Files transferred in parallel, per task.
+
+        Read at the start of every cycle, so changing it in the UI applies to
+        the next run without restarting the container.
+        """
+        raw = await db.db_get_setting(CONCURRENCY_SETTING_KEY, "")
+        return parse_concurrency(raw)
+
+    @classmethod
     def live_transferred(cls) -> tuple[int, int]:
         """Bytes sent / received so far by all running tasks, retries excluded.
 
@@ -383,7 +415,11 @@ class SyncEngine:
             # gather only resolves when *every* operation is done, which used
             # to leave the overall progress frozen at 0% for the whole run and
             # then jump straight to 100%.
-            semaphore = asyncio.Semaphore(SYNC_CONCURRENCY)
+            # Files are transferred with a per-task concurrency limit. The
+            # number comes from the settings table (UI), so a change applies
+            # to the next cycle without restarting the container.
+            concurrency = await cls.get_concurrency()
+            semaphore = asyncio.Semaphore(concurrency)
 
             async def _run_one(op: SyncOperation):
                 try:

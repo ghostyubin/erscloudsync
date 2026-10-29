@@ -105,11 +105,15 @@ docker compose -f docker-compose.test.yml pull && docker compose -f docker-compo
 | BAUDUSYNC_DATA_DIR | /config | 数据目录（数据库、日志）|
 | BAUDUSYNC_SYNC_ROOT | /sync | 本地同步根目录 |
 | BAUDUSYNC_DOWNLOAD_DIR | /downloads | 下载文件存放目录 |
-| BAUDUSYNC_CONCURRENCY | 3 | 并发同步文件数 |
+| BAUDUSYNC_CONCURRENCY | 3 | 并发同步文件数（界面上可覆盖，见下）|
 | BAUDUSYNC_CHUNK_SIZE | 8388608 | 传输分块大小（字节）|
 | BAIDU_APP_KEY | (内置) | 百度网盘 OAuth App Key |
 | BAIDU_APP_SECRET | (内置) | 百度网盘 OAuth App Secret |
 | BAIDU_REDIRECT_URI | oob | OAuth 回调方式 |
+
+**并发上传数量**除了环境变量，还能在「全局设置 → 同步设置」里直接改（1–16）：
+值存在 `settings` 表（键 `sync_concurrency`），**每一轮同步开始时读取**，改完不用重启，
+下一轮生效。环境变量只是没设置过时的默认值——库里一旦有值，以库为准。
 
 下面三个只在 `docker-compose.yml` 里做路径插值（宿主机的卷挂载点），**不传入容器**：
 

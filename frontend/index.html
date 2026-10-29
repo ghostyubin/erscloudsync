@@ -169,6 +169,22 @@
                             <div class="settings-card-arrow">›</div>
                         </div>
                     </div>
+
+                    <!-- 并发上传数量：作用于每个任务同时传输的文件数 -->
+                    <div class="settings-field">
+                        <div class="settings-field-info">
+                            <div class="settings-field-title">并发上传数量</div>
+                            <p class="settings-field-desc">
+                                每个任务同时传输的文件数（1–16）。调大能更充分地利用带宽，但会占用更多内存和云端请求配额；调小更稳。修改后<strong>下一轮同步生效</strong>，不用重启服务。
+                            </p>
+                        </div>
+                        <div class="settings-field-control">
+                            <input type="number" id="setting-sync-concurrency" class="input settings-number"
+                                   min="1" max="16" step="1" value="3" inputmode="numeric">
+                            <button class="btn btn-primary settings-save" id="setting-sync-concurrency-save"
+                                    onclick="app.saveSyncConcurrency()">保存</button>
+                        </div>
+                    </div>
                 </section>
 
                 <!-- 系统信息 -->

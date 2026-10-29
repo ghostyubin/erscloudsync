@@ -2,17 +2,58 @@
 
 import os
 import shutil
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
-from app.config import LOCAL_SYNC_ROOT, LOCAL_ROOTS, DOWNLOAD_DIR, DATA_DIR
+from pydantic import BaseModel
+
+from app.config import LOCAL_SYNC_ROOT, LOCAL_ROOTS, DOWNLOAD_DIR, DATA_DIR, SYNC_CONCURRENCY
+from app import database as db
+from app.services.sync_engine import (
+    CONCURRENCY_MAX, CONCURRENCY_MIN, CONCURRENCY_SETTING_KEY, SyncEngine,
+)
 from app.services.traffic import traffic
 from app.version import APP_VERSION
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
 
+class RuntimeSettings(BaseModel):
+    """Globals that can be changed without editing the compose file."""
+    sync_concurrency: Optional[int] = None
+
+
 @router.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@router.get("/settings")
+async def get_settings():
+    """Runtime-tunable settings plus the bounds the UI should enforce."""
+    return {
+        "sync_concurrency": await SyncEngine.get_concurrency(),
+        "defaults": {"sync_concurrency": SYNC_CONCURRENCY},
+        "limits": {"sync_concurrency": {"min": CONCURRENCY_MIN,
+                                        "max": CONCURRENCY_MAX}},
+    }
+
+
+@router.put("/settings")
+async def update_settings(req: RuntimeSettings):
+    """Persist runtime settings.
+
+    The value is clamped rather than rejected: the UI already limits the input,
+    and a stale browser tab should not make every sync fail with a 400.
+    """
+    result = {}
+    if req.sync_concurrency is not None:
+        value = max(CONCURRENCY_MIN, min(CONCURRENCY_MAX, int(req.sync_concurrency)))
+        await db.db_set_setting(CONCURRENCY_SETTING_KEY, str(value))
+        result["sync_concurrency"] = value
+    if not result:
+        raise HTTPException(400, "No setting provided")
+    return result
 
 
 @router.get("/traffic")
