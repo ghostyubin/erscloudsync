@@ -41,8 +41,8 @@ echo YOUR_GITHUB_TOKEN | docker login ghcr.io -u ghostyubin --password-stdin
 # 2. 拉取镜像
 docker pull ghcr.io/ghostyubin/erscloudsync:latest
 
-# 3. 创建 docker-compose.yml 并启动
-#    参考 docker-compose.test.yml
+# 3. 用仓库里的 docker-compose.yml 启动（只改 volumes 的挂载路径即可）
+#    远程机器和本地构建共用这一个文件，区别只是加不加 --build
 docker compose up -d
 
 # 4. 访问 Web 界面
@@ -74,6 +74,7 @@ docker run -d \
   -v /path/to/sync:/sync \
   -v /path/to/downloads:/downloads \
   -e TZ=Asia/Shanghai \
+  --memory 2g --memory-swap 3g \
   ghcr.io/ghostyubin/erscloudsync:latest
 ```
 
@@ -90,8 +91,8 @@ docker run -d \
 # 其他机器拉取最新镜像
 docker pull ghcr.io/ghostyubin/erscloudsync:latest
 
-# 或用 docker-compose
-docker compose -f docker-compose.test.yml pull && docker compose -f docker-compose.test.yml up -d
+# 或用 docker-compose（仓库里只有一个 compose 文件）
+docker compose pull && docker compose up -d
 ```
 
 ## 配置说明
@@ -425,8 +426,7 @@ erscloudsync/
 ├── .github/workflows/
 │   └── docker-publish.yml    # CI/CD 自动构建
 ├── Dockerfile                # 多架构 Docker 构建
-├── docker-compose.yml        # NAS 本地部署
-├── docker-compose.test.yml   # 远程机器部署 (GHCR 镜像)
+├── docker-compose.yml        # 唯一部署文件（GHCR 镜像，含 2G 内存上限）
 ├── build.sh                  # 本地多架构构建脚本
 └── requirements.txt          # Python 依赖
 ```

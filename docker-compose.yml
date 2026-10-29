@@ -2,12 +2,17 @@
 # Cloud sync for NAS (Baidu Netdisk & 115 Netdisk)
 #
 # Usage:
-#   docker compose up -d --build
+#   docker compose up -d          # 用 GHCR 上的多架构镜像
+#   docker compose up -d --build  # 本机自己构建（需要能访问 PyPI）
 #
-# Only the three volumes and TZ are actually settings. Every BAUDUSYNC_*
-# variable has a default in app/config.py and most are also baked into the image
-# as ENV, so listing them here with the same value adds nothing except a second
-# place to forget when a default changes.
+# Update:
+#   docker compose pull && docker compose up -d
+#
+# 仓库里只保留这一个 compose 文件：远程机器和本地构建共用它，区别只在于
+# 加不加 --build。Only the three volumes, TZ and the memory caps are actually
+# settings. Every BAUDUSYNC_* variable has a default in app/config.py and most
+# are also baked into the image as ENV, so listing them here with the same value
+# adds nothing except a second place to forget when a default changes.
 
 services:
   baudusync:
@@ -31,6 +36,12 @@ services:
       - ${BAUDUSYNC_SYNC_DIR:-./sync}:/sync
       # Downloads directory - for files downloaded from cloud
       - ${BAUDUSYNC_DOWNLOAD_DIR:-./downloads}:/downloads
+      # 仅在「容器内域名解析全线失败」时启用（宿主机 dockerd 以 iptables='0'
+      # 运行，内嵌 DNS 127.0.0.11 起不来，典型是 OpenWrt）。详见 README「排错」。
+      #   cp resolv.conf.example resolv.conf  →  取消下面这行的注释
+      # ⚠️ 用 Dockge / Portainer 管理时，这里必须换成宿主机绝对路径，
+      #    写 ./resolv.conf 会被解析成面板容器内的 /opt/stacks/... 然后挂载失败。
+      # - /abs/path/to/resolv.conf:/etc/resolv.conf:ro
     environment:
       # The image runs on UTC; without this every log line and every timestamp
       # in the UI is 8 hours off on a China-based NAS.
@@ -42,6 +53,13 @@ services:
       # - BAUDUSYNC_RETRY_DELAY=3          # base backoff; attempt N waits N * this
       # - BAUDUSYNC_REALTIME_MAX_DELAY=30  # start a realtime cycle after N quiet-less seconds (0 = wait forever)
       # - BAUDUSYNC_WRITE_GRACE=3          # skip files modified within the last N seconds
+    # 内存上限。为什么需要：docker stats 里的 5+ GiB 是被读过的文件留在
+    # page cache 里（cgroup 内存 = anon + page cache），不代表进程真的占了这么多；
+    # 但不设上限时，同步几百个大文件能把整台 NAS 的可用内存吃光。
+    # 2g 够用：进程 anon 通常 100–150 MB，其余是可回收的 cache。
+    # memswap_limit 比上限高 1g，让内核触顶时先换出而不是直接 OOM。
+    mem_limit: 2g
+    memswap_limit: 3g
     # json-file has no size limit by default, so the container log would grow
     # forever. The app keeps its own rotating file log under /config/log.
     logging:
