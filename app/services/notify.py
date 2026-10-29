@@ -26,7 +26,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
@@ -89,6 +89,22 @@ def fmt_duration(seconds: float) -> str:
         return f"{minutes}分{sec}秒"
     hours, minutes = divmod(minutes, 60)
     return f"{hours}小时{minutes}分"
+
+
+# 消息里最多点几个文件名，再多就只给数量
+NAME_LIMIT = 3
+
+
+def _basename(rel_path: str) -> str:
+    """``1/a/b.mp4`` → ``b.mp4``"""
+    rel = (rel_path or "").replace("\\", "/").rstrip("/")
+    return rel.rsplit("/", 1)[-1] if rel else ""
+
+
+def _remember(bucket: list, name: str) -> None:
+    """记文件名，超过上限就不再加，避免长任务在内存里攒一个巨长列表。"""
+    if name and len(bucket) < NAME_LIMIT and name not in bucket:
+        bucket.append(name)
 
 
 # --------------------------------------------------------------------------
@@ -212,49 +228,83 @@ class FolderBatch:
     # 否则一个安静的文件夹每轮扫描都会冒出一条「同步完成 0 个文件」。
     has_activity: bool = False
     error: str = ""
+    # 只留前几个文件名：单个文件时直接显示它，失败时点名是哪个出错。
+    # 上限 3 是为了消息不被文件名刷屏，也避免长任务攒出一个大列表。
+    files: list = field(default_factory=list)
+    failed_files: list = field(default_factory=list)
+
+    @property
+    def moved(self) -> int:
+        return self.uploads + self.downloads + self.deletes
 
     def body(self) -> str:
-        lines = []
-        if self.error:
-            head = "❌ 同步失败"
-        elif self.failed:
-            head = f"❌ 同步完成（{self.failed} 个失败）"
-        else:
-            head = "✅ 同步完成"
-        lines.append(f"{head} · {self.task_name}")
+        """正文：前三行讲清「传了什么 / 出没出错 / 多久」，出错再补一句怎么处理。
 
-        parts = []
+        纯文本（msg_type=text）—— 微信里看企业微信消息，markdown 会显示
+        「不支持的消息类型」。所以排版只靠换行和间隔号，不依赖任何标记语法。
+        """
+        lines: list[str] = []
+        actions = []
         if self.uploads:
-            parts.append(f"上传 {self.uploads}")
+            actions.append(f"上传 {self.uploads}")
         if self.downloads:
-            parts.append(f"下载 {self.downloads}")
+            actions.append(f"下载 {self.downloads}")
         if self.deletes:
-            parts.append(f"删除 {self.deletes}")
+            actions.append(f"删除 {self.deletes}")
+
+        # ---- 第一行：这一波到底传了多少 ----
         if self.failed:
-            parts.append(f"失败 {self.failed}")
-        if self.noop:
-            parts.append(f"无变化 {self.noop}")
-        if parts:
-            lines.append(" · ".join(parts))
+            seg = []
+            if self.moved:
+                seg.append(f"成功 {self.moved} 个")
+            seg.append(f"失败 {self.failed} 个")
+            if self.bytes_moved:
+                seg.append(fmt_bytes(self.bytes_moved))
+            lines.append(" · ".join(seg))
+        elif self.moved == 1 and self.files:
+            # 只有一个文件时，文件名比「1 个文件」有用得多
+            size = f" · {fmt_bytes(self.bytes_moved)}" if self.bytes_moved else ""
+            lines.append(f"{self.files[0]}{size}")
+        elif self.moved:
+            # 纯上传不说动作（默认就是上传），混合或纯下载/删除才说出来
+            if self.uploads and not (self.downloads or self.deletes):
+                head = f"{self.moved} 个文件"
+            elif len(actions) == 1:
+                head = f"{actions[0]} 个文件"
+            else:
+                head = " · ".join(f"{a} 个" for a in actions)
+            if self.bytes_moved:
+                head += f" · {fmt_bytes(self.bytes_moved)}"
+            lines.append(head)
 
-        metrics = []
-        if self.bytes_moved:
-            metrics.append(fmt_bytes(self.bytes_moved))
-        if self.first_at and self.last_at > self.first_at:
-            metrics.append(f"用时 {fmt_duration(self.last_at - self.first_at)}")
-        metrics.append(datetime.now().strftime("%H:%M"))
-        lines.append(" · ".join(metrics))
-
+        # ---- 出错时点名：哪个文件、什么原因 ----
+        if self.failed_files:
+            shown = "、".join(self.failed_files[:3])
+            if self.failed > len(self.failed_files[:3]):
+                shown += f" 等 {self.failed} 个"
+            lines.append(f"失败：{shown}")
         if self.error:
-            lines.append(f"错误: {self.error}")
+            lines.append(f"原因：{self.error}")
+
+        # ---- 最后一行：多久、几点 ----
+        # 整轮扫挂（一个文件都没动）时不给「用时」，那会让人以为传了一会儿才失败
+        tail = []
+        if (self.moved or self.failed) and self.first_at and self.last_at > self.first_at:
+            tail.append(f"用时 {fmt_duration(self.last_at - self.first_at)}")
+        tail.append(datetime.now().strftime("%H:%M"))
+        lines.append(" · ".join(tail))
+
+        if self.error or self.failed:
+            lines.append("修好后可在「同步记录」点重试")
         return "\n".join(lines)
 
     def title(self) -> str:
+        """标题 = 状态 + 文件夹。手机上第一条就看清是哪个文件夹、成没成。"""
         if self.error:
-            return f"{self.label} 同步失败"
+            return f"❌ 同步失败 · {self.label}"
         if self.failed:
-            return f"{self.label} 同步完成（{self.failed} 个失败）"
-        return f"{self.label} 同步完成"
+            return f"⚠️ {self.failed} 个失败 · {self.label}"
+        return f"✅ 传输完成 · {self.label}"
 
 
 # --------------------------------------------------------------------------
@@ -341,8 +391,10 @@ class Notifier:
             batch.last_at = now
             if cycle_started:
                 batch.first_at = min(batch.first_at, cycle_started)
+            name = _basename(rel_path)
             if not ok:
                 batch.failed += 1
+                _remember(batch.failed_files, name)
                 return
             if action == "upload":
                 batch.uploads += 1
@@ -350,6 +402,7 @@ class Notifier:
                 batch.downloads += 1
             elif action == "delete":
                 batch.deletes += 1
+            _remember(batch.files, name)
             batch.bytes_moved += max(0, size)
         except Exception:  # noqa: BLE001 - 统计失败绝不能影响同步
             logger.debug("notifier.record failed", exc_info=True)
