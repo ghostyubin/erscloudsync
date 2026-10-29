@@ -17,7 +17,12 @@ WORKDIR /app
 
 # Install Python dependencies first (better layer caching)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# 在部分网络环境里 files.pythonhosted.org 只有几十 KB/s，一轮 pip install 要十几
+# 分钟。需要时用国内源构建：
+#   docker compose build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+# 默认仍走官方源，公开镜像的行为不变。
+ARG PIP_INDEX_URL=https://pypi.org/simple
+RUN pip install --no-cache-dir -i "$PIP_INDEX_URL" -r requirements.txt
 
 # Copy application code (CACHE_BUST arg forces fresh copy on rebuild)
 ARG CACHE_BUST=1

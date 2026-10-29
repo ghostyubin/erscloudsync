@@ -22,6 +22,7 @@ realtime 任务在拷贝大目录时会连续触发几十轮扫描，每轮都�
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -125,6 +126,32 @@ def _as_bool(raw, default: bool = False) -> bool:
     if raw is None or raw == "":
         return default
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _gateway_failure(status: int, text: str) -> str:
+    """网关的业务失败也要算失败 —— 返回空串表示成功，否则返回失败原因。
+
+    Heimdallr 即使推送失败（token 不对、渠道没绑定、企业微信报 60020…）
+    仍然返回 HTTP 200，真正结果在响应体的 ``code`` 里：成功是
+    ``{"code":0,"message":"success"}``。只看状态码会把「没人收到」当成
+    「发送成功」，这正是最难查的那种问题。
+    """
+    if status >= 400:
+        return f"HTTP {status}: {text}"
+    try:
+        data = json.loads(text)
+    except Exception:  # noqa: BLE001 - 不是 JSON 就不猜，按状态码算成功
+        return ""
+    if not isinstance(data, dict) or "code" not in data:
+        return ""
+    try:
+        code = int(data.get("code"))
+    except (TypeError, ValueError):
+        return ""
+    if code == 0:
+        return ""
+    reason = data.get("message") or data.get("msg") or ""
+    return f"网关返回 code={code}：{reason}".rstrip("：")
 
 
 def _clamp_quiet(raw, default: int) -> int:
@@ -458,8 +485,9 @@ class Notifier:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(endpoint, json=payload, ssl=ssl_arg) as resp:
                     text = (await resp.text())[:300]
-                    if resp.status >= 400:
-                        return False, f"HTTP {resp.status}: {text}"
+                    failure = _gateway_failure(resp.status, text)
+                    if failure:
+                        return False, failure
                     return True, f"HTTP {resp.status}: {text}"
         except asyncio.TimeoutError:
             return False, "请求网关超时（15 秒）"
@@ -490,9 +518,10 @@ class Notifier:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(endpoint, json=payload, ssl=ssl_arg) as resp:
                     text = (await resp.text())[:300]
-                    ok = resp.status < 400
-                    return {"ok": ok, "endpoint": endpoint,
-                            "status": resp.status, "message": text}
+                    failure = _gateway_failure(resp.status, text)
+                    return {"ok": not failure, "endpoint": endpoint,
+                            "status": resp.status,
+                            "message": failure or text}
         except asyncio.TimeoutError:
             return {"ok": False, "endpoint": endpoint,
                     "message": "请求网关超时（15 秒）"}
