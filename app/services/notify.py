@@ -93,6 +93,8 @@ def fmt_duration(seconds: float) -> str:
 
 # 消息里最多点几个文件名，再多就只给数量
 NAME_LIMIT = 3
+# 一个桶里最多记多少个不同子目录（只用于数「N 个文件夹」，防止长任务吃内存）
+DIR_LIMIT = 20000
 
 
 def _basename(rel_path: str) -> str:
@@ -105,6 +107,19 @@ def _remember(bucket: list, name: str) -> None:
     """记文件名，超过上限就不再加，避免长任务在内存里攒一个巨长列表。"""
     if name and len(bucket) < NAME_LIMIT and name not in bucket:
         bucket.append(name)
+
+
+def _subdir_of(rel_path: str) -> str:
+    """桶内的子目录：``1/第一天/x.arw`` → ``第一天``，``1/a.txt`` → ``""``。
+
+    第一段是桶本身（/sync/1 的 ``1``），去掉它和文件名，剩下的就是「涉及到的
+    文件夹」。``1/第一天/sub/x.arw`` 算 ``第一天/sub`` 这一个文件夹。
+    """
+    rel = (rel_path or "").replace("\\", "/").strip("/")
+    parts = [p for p in rel.split("/") if p]
+    if len(parts) <= 2:
+        return ""
+    return "/".join(parts[1:-1])
 
 
 # --------------------------------------------------------------------------
@@ -232,50 +247,48 @@ class FolderBatch:
     # 上限 3 是为了消息不被文件名刷屏，也避免长任务攒出一个大列表。
     files: list = field(default_factory=list)
     failed_files: list = field(default_factory=list)
+    # 这一波涉及到的子目录（相对本桶、去重）。「6 个文件夹」就是它的长度；
+    # 传的都在桶根下（如 /sync/1/a.txt）时为空，消息里显示 0 个文件夹。
+    dirs: set = field(default_factory=set)
 
     @property
     def moved(self) -> int:
         return self.uploads + self.downloads + self.deletes
 
     def body(self) -> str:
-        """正文：前三行讲清「传了什么 / 出没出错 / 多久」，出错再补一句怎么处理。
+        """正文：目录 / 文件数·文件夹数 / 大小 / 用时，出错再补失败清单和原因。
 
         纯文本（msg_type=text）—— 微信里看企业微信消息，markdown 会显示
-        「不支持的消息类型」。所以排版只靠换行和间隔号，不依赖任何标记语法。
+        「不支持的消息类型」。排版只靠换行和间隔号，不依赖任何标记语法。
         """
-        lines: list[str] = []
+        lines: list[str] = [f"目录 {self.label}"]
+
+        # ---- 这一波动了多少：文件数 + 文件夹数 ----
+        total = self.moved + self.failed
+        if total:
+            seg = [f"共 {total} 个文件", f"{len(self.dirs) if self.dirs else 0} 个文件夹"]
+            lines.append(" · ".join(seg))
+            # 成功和失败都有时才拆开说；全成或全败不用把同一个数说两遍
+            if self.failed and self.moved:
+                lines.append(f"成功 {self.moved} 个 · 失败 {self.failed} 个")
+
+        # 上传是默认行为，纯上传不用啰嗦；下载、删除、混合动作才说出来
         actions = []
         if self.uploads:
-            actions.append(f"上传 {self.uploads}")
+            actions.append(f"上传 {self.uploads} 个")
         if self.downloads:
-            actions.append(f"下载 {self.downloads}")
+            actions.append(f"下载 {self.downloads} 个")
         if self.deletes:
-            actions.append(f"删除 {self.deletes}")
+            actions.append(f"删除 {self.deletes} 个")
+        if len(actions) > 1 or self.downloads or self.deletes:
+            lines.append(" · ".join(actions))
 
-        # ---- 第一行：这一波到底传了多少 ----
-        if self.failed:
-            seg = []
-            if self.moved:
-                seg.append(f"成功 {self.moved} 个")
-            seg.append(f"失败 {self.failed} 个")
-            if self.bytes_moved:
-                seg.append(fmt_bytes(self.bytes_moved))
-            lines.append(" · ".join(seg))
-        elif self.moved == 1 and self.files:
-            # 只有一个文件时，文件名比「1 个文件」有用得多
-            size = f" · {fmt_bytes(self.bytes_moved)}" if self.bytes_moved else ""
-            lines.append(f"{self.files[0]}{size}")
-        elif self.moved:
-            # 纯上传不说动作（默认就是上传），混合或纯下载/删除才说出来
-            if self.uploads and not (self.downloads or self.deletes):
-                head = f"{self.moved} 个文件"
-            elif len(actions) == 1:
-                head = f"{actions[0]} 个文件"
-            else:
-                head = " · ".join(f"{a} 个" for a in actions)
-            if self.bytes_moved:
-                head += f" · {fmt_bytes(self.bytes_moved)}"
-            lines.append(head)
+        # 只有一个文件时，文件名比「共 1 个文件」有用得多
+        if self.moved == 1 and not self.failed and self.files:
+            lines.append(f"文件：{self.files[0]}")
+
+        if self.bytes_moved:
+            lines.append(f"大小 {fmt_bytes(self.bytes_moved)}")
 
         # ---- 出错时点名：哪个文件、什么原因 ----
         if self.failed_files:
@@ -392,6 +405,10 @@ class Notifier:
             if cycle_started:
                 batch.first_at = min(batch.first_at, cycle_started)
             name = _basename(rel_path)
+            # 记「涉及哪个文件夹」：成功失败都要算，否则全失败的那波会显示 0 个文件夹
+            sub = _subdir_of(rel_path)
+            if sub and len(batch.dirs) < DIR_LIMIT:
+                batch.dirs.add(sub)
             if not ok:
                 batch.failed += 1
                 _remember(batch.failed_files, name)

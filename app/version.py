@@ -10,4 +10,4 @@ build a NAS is actually running:
 ``./build.sh`` does this automatically before building the image.
 """
 
-APP_VERSION = "DEV_202610292047"
+APP_VERSION = "DEV_202610292114"
