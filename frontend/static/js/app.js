@@ -1308,7 +1308,11 @@ const App = {
         if (device) device.value = n.device || '';
         if (url) url.value = n.url || '';
         if (token) {
-            token.value = '';
+            // 不要清空已经敲进去的 token。设置页每次切回来都会重新拉配置，
+            // 以前这里无条件 value=''，于是「填 token → 去看一眼别的页面 →
+            // 回来点保存」提交的是空串，而后端把空串当「不修改」——界面提示
+            // 保存成功，token 却从没落库，测试发送只会回「请先填写 Token」。
+            // 只有真正保存成功后才清空（见 saveNotifySettings）。
             token.placeholder = n.token_set
                 ? `已保存：${n.token_masked}（留空则不修改）`
                 : '从 Heimdallr 的 .env 里取分组 token';
@@ -1372,10 +1376,17 @@ const App = {
             const res = await this.api('PUT', '/api/system/settings', payload);
             if (res && res.notify) this._applyNotifySettings(res.notify, {});
             if (tokenEl) tokenEl.value = '';
+            // token 是「留空即不修改」，所以缺 token 时保存照样成功；这里必须
+            // 明确说出来，否则用户以为配好了，一点测试才失败。
+            const noToken = !!(res && res.notify && !res.notify.token_set);
             if (!silent) {
-                this.toast(payload.notify.enabled
-                    ? `通知已开启，文件夹静默 ${quiet} 秒后会推送`
-                    : '通知已关闭', 'success');
+                if (noToken) {
+                    this.toast('已保存，但还没填「分组 Token」——没有 token 通知发不出去', 'error');
+                } else {
+                    this.toast(payload.notify.enabled
+                        ? `通知已开启，文件夹静默 ${quiet} 秒后会推送`
+                        : '通知已关闭', 'success');
+                }
                 if (btn) {
                     btn.classList.add('saved');
                     setTimeout(() => btn.classList.remove('saved'), 1200);

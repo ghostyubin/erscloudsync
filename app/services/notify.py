@@ -598,7 +598,11 @@ class Notifier:
         """
         cfg = await self.config(force=True)
         if not cfg.configured:
-            return {"ok": False, "message": "请先填写网关地址和分组 Token"}
+            # 点名缺哪一项。只说「请先填写网关地址和分组 Token」会让人以为
+            # 自己已经填过（地址明明在），实际缺的往往只是 token。
+            missing = [name for name, value in
+                       (("网关地址", cfg.url), ("分组 Token", cfg.token)) if not value]
+            return {"ok": False, "message": "请先填写" + "、".join(missing)}
         if not title:
             title = f"同步设备：{cfg.device}"
         endpoint = cfg.endpoint
