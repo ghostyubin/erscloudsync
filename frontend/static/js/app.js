@@ -1290,8 +1290,128 @@ const App = {
                 input.value = s.sync_concurrency;
                 input.dataset.default = dflt == null ? '' : String(dflt);
             }
+            if (s && s.notify) this._applyNotifySettings(s.notify, s.limits || {});
         } catch (e) { /* settings optional */ }
         await connPromise;
+    },
+
+    /* 同步完成通知：把服务端配置回填到表单。token 只回填打码值，
+       留空表示「不修改」，否则保存时会把真实 token 覆盖成星号。 */
+    _applyNotifySettings(n, limits) {
+        const el = id => document.getElementById(id);
+        const url = el('setting-notify-url');
+        const token = el('setting-notify-token');
+        const quiet = el('setting-notify-quiet');
+        const enabled = el('setting-notify-enabled');
+        const insecure = el('setting-notify-insecure');
+        if (url) url.value = n.url || '';
+        if (token) {
+            token.value = '';
+            token.placeholder = n.token_set
+                ? `已保存：${n.token_masked}（留空则不修改）`
+                : '从 Heimdallr 的 .env 里取分组 token';
+        }
+        if (quiet) {
+            const lim = (limits && limits.notify_quiet) || { min: 10, max: 3600 };
+            quiet.min = lim.min;
+            quiet.max = lim.max;
+            quiet.value = n.quiet;
+        }
+        if (enabled) enabled.checked = !!n.enabled;
+        if (insecure) insecure.checked = !!n.insecure;
+    },
+
+    /* silent=true 时不弹成功 toast，供「保存并发送测试」复用。 */
+    async saveNotifySettings(silent) {
+        const el = id => document.getElementById(id);
+        const urlEl = el('setting-notify-url');
+        const tokenEl = el('setting-notify-token');
+        const quietEl = el('setting-notify-quiet');
+        const btn = el('setting-notify-save');
+        if (!urlEl || !quietEl) return false;
+
+        const url = (urlEl.value || '').trim();
+        if (url && !/^https?:\/\//i.test(url)) {
+            if (!silent) {
+                this.toast('网关地址要以 http:// 或 https:// 开头', 'error');
+                urlEl.focus();
+            }
+            return false;
+        }
+        const min = parseInt(quietEl.min, 10) || 10;
+        const max = parseInt(quietEl.max, 10) || 3600;
+        const quiet = parseInt(quietEl.value, 10);
+        if (!Number.isFinite(quiet) || quiet < min || quiet > max) {
+            if (!silent) {
+                this.toast(`静默时间要在 ${min}–${max} 秒之间`, 'error');
+                quietEl.focus();
+            }
+            return false;
+        }
+
+        const enabledEl = el('setting-notify-enabled');
+        const insecureEl = el('setting-notify-insecure');
+        const payload = {
+            notify: {
+                enabled: !!(enabledEl && enabledEl.checked),
+                url: url,
+                quiet: quiet,
+                insecure: !!(insecureEl && insecureEl.checked),
+            }
+        };
+        // 空 token = 不修改：界面上是打码值，照原样提交会把真 token 写坏
+        const token = (tokenEl ? tokenEl.value : '').trim();
+        if (token) payload.notify.token = token;
+
+        if (btn) btn.disabled = true;
+        try {
+            const res = await this.api('PUT', '/api/system/settings', payload);
+            if (res && res.notify) this._applyNotifySettings(res.notify, {});
+            if (tokenEl) tokenEl.value = '';
+            if (!silent) {
+                this.toast(payload.notify.enabled
+                    ? `通知已开启，文件夹静默 ${quiet} 秒后会推送`
+                    : '通知已关闭', 'success');
+                if (btn) {
+                    btn.classList.add('saved');
+                    setTimeout(() => btn.classList.remove('saved'), 1200);
+                }
+            }
+            return true;
+        } catch (e) {
+            if (!silent) this.toast('保存失败: ' + e.message, 'error');
+            return false;
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    },
+
+    /* 先保存再发测试：避免「改了地址没保存就点测试」发到旧地址上去。 */
+    async testNotify() {
+        const btn = document.getElementById('setting-notify-test');
+        const out = document.getElementById('setting-notify-result');
+        if (btn) btn.disabled = true;
+        if (out) { out.textContent = '正在保存并发送…'; out.className = 'notify-result'; }
+        try {
+            if (!await this.saveNotifySettings(true)) {
+                if (out) { out.textContent = '请先补全网关地址和静默时间'; out.className = 'notify-result err'; }
+                return;
+            }
+            const res = await this.api('POST', '/api/system/notify/test');
+            if (out) {
+                out.textContent = res.ok
+                    ? `已送达 ${res.endpoint || ''} · HTTP ${res.status} · ${String(res.message || '').slice(0, 120)}`
+                    : `发送失败：${res.message || '未知错误'}`;
+                out.className = 'notify-result ' + (res.ok ? 'ok' : 'err');
+            }
+            this.toast(res.ok ? '测试通知已发出，去手机上看看' : '测试发送失败：' + (res.message || ''),
+                       res.ok ? 'success' : 'error');
+        } catch (e) {
+            if (out) { out.textContent = '发送失败：' + e.message; out.className = 'notify-result err'; }
+            this.toast('测试发送失败: ' + e.message, 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
     },
 
     async saveSyncConcurrency() {

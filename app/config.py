@@ -40,6 +40,14 @@ REALTIME_MAX_DELAY = float(os.environ.get("BAUDUSYNC_REALTIME_MAX_DELAY", "30"))
 # above would upload a half-copied photo and push it again once it is complete.
 REALTIME_WRITE_GRACE = float(os.environ.get("BAUDUSYNC_WRITE_GRACE", "3"))
 
+# --- 同步完成通知（默认值，界面里保存过的以数据库为准） ---
+# 网关地址填到域名即可，代码会拼上 /push（兼容 Heimdallr 的 POST /push）。
+NOTIFY_DEFAULT_URL = os.environ.get("BAUDUSYNC_NOTIFY_URL", "")
+NOTIFY_DEFAULT_KEY = os.environ.get("BAUDUSYNC_NOTIFY_KEY", "")
+# 文件夹静默多少秒才算「这一波传完了」。太短会在拷贝过程中推送，
+# 太长则拷完要等很久才收到消息。
+NOTIFY_DEFAULT_QUIET = int(os.environ.get("BAUDUSYNC_NOTIFY_QUIET", "60"))
+
 # Local sync root (mounted volume in Docker, fallback to local dir for dev)
 LOCAL_SYNC_ROOT = Path(os.environ.get("BAUDUSYNC_SYNC_ROOT", str(BASE_DIR / "sync")))
 

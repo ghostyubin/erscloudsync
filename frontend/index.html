@@ -185,6 +185,53 @@
                                     onclick="app.saveSyncConcurrency()">保存</button>
                         </div>
                     </div>
+
+                    <!-- 同步完成通知：按文件夹聚合，静默满 N 秒后推一条到 Heimdallr -->
+                    <div class="settings-field settings-field-block">
+                        <div class="settings-field-info">
+                            <div class="settings-field-title">同步完成通知</div>
+                            <p class="settings-field-desc">
+                                同步根目录下的<strong>每个文件夹</strong>单独统计：这一波文件传完、且静默 N 秒没有新文件后，推送一条汇总到 Heimdallr 网关。
+                                地址填到域名即可（会自动补 <code>/push</code>）。
+                            </p>
+                        </div>
+
+                        <div class="notify-grid">
+                            <div class="notify-item notify-item-wide">
+                                <span>网关地址</span>
+                                <input type="text" id="setting-notify-url" class="input"
+                                       placeholder="https://notify.example.com" spellcheck="false" autocomplete="off">
+                            </div>
+                            <div class="notify-item notify-item-wide">
+                                <span>分组 Token</span>
+                                <input type="password" id="setting-notify-token" class="input"
+                                       placeholder="从 Heimdallr 的 .env 里取分组 token" autocomplete="new-password">
+                            </div>
+                            <div class="notify-item">
+                                <span>静默时间（秒）</span>
+                                <input type="number" id="setting-notify-quiet" class="input settings-number"
+                                       min="10" max="3600" step="5" value="60" inputmode="numeric">
+                            </div>
+                            <div class="notify-item" style="justify-content:flex-end;">
+                                <div class="notify-checks">
+                                    <label class="notify-check">
+                                        <input type="checkbox" id="setting-notify-enabled"> 启用通知
+                                    </label>
+                                    <label class="notify-check">
+                                        <input type="checkbox" id="setting-notify-insecure"> 跳过证书校验
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="notify-actions">
+                            <button class="btn btn-primary settings-save" id="setting-notify-save"
+                                    onclick="app.saveNotifySettings()">保存</button>
+                            <button class="btn btn-secondary settings-save" id="setting-notify-test"
+                                    onclick="app.testNotify()">保存并发送测试</button>
+                            <span class="notify-result" id="setting-notify-result"></span>
+                        </div>
+                    </div>
                 </section>
 
                 <!-- 系统信息 -->

@@ -9,6 +9,10 @@ from pydantic import BaseModel
 
 from app.config import LOCAL_SYNC_ROOT, LOCAL_ROOTS, DOWNLOAD_DIR, DATA_DIR, SYNC_CONCURRENCY
 from app import database as db
+from app.services.notify import (
+    ENABLED_KEY, INSECURE_KEY, QUIET_KEY, QUIET_MAX, QUIET_MIN, TOKEN_KEY,
+    URL_KEY, load_config, notifier,
+)
 from app.services.sync_engine import (
     CONCURRENCY_MAX, CONCURRENCY_MIN, CONCURRENCY_SETTING_KEY, SyncEngine,
 )
@@ -18,9 +22,41 @@ from app.version import APP_VERSION
 router = APIRouter(prefix="/api/system", tags=["system"])
 
 
+class NotifySettings(BaseModel):
+    """同步完成通知。token 留空表示「不修改」，因为界面回显的是打码值。"""
+    enabled: Optional[bool] = None
+    url: Optional[str] = None
+    token: Optional[str] = None
+    quiet: Optional[int] = None
+    insecure: Optional[bool] = None
+
+
 class RuntimeSettings(BaseModel):
     """Globals that can be changed without editing the compose file."""
     sync_concurrency: Optional[int] = None
+    notify: Optional[NotifySettings] = None
+
+
+def _mask(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:3]}{'*' * 6}{value[-3:]}"
+
+
+async def _notify_payload() -> dict:
+    cfg = await load_config()
+    return {
+        "enabled": cfg.enabled,
+        "url": cfg.url,
+        "quiet": cfg.quiet,
+        "insecure": cfg.insecure,
+        "token_set": bool(cfg.token),
+        "token_masked": _mask(cfg.token),
+        "configured": cfg.configured,
+        "endpoint": cfg.endpoint,
+    }
 
 
 @router.get("/health")
@@ -33,9 +69,13 @@ async def get_settings():
     """Runtime-tunable settings plus the bounds the UI should enforce."""
     return {
         "sync_concurrency": await SyncEngine.get_concurrency(),
+        "notify": await _notify_payload(),
+        # 调试用：当前排队等静默的文件夹
+        "notify_status": notifier.snapshot(),
         "defaults": {"sync_concurrency": SYNC_CONCURRENCY},
         "limits": {"sync_concurrency": {"min": CONCURRENCY_MIN,
-                                        "max": CONCURRENCY_MAX}},
+                                        "max": CONCURRENCY_MAX},
+                   "notify_quiet": {"min": QUIET_MIN, "max": QUIET_MAX}},
     }
 
 
@@ -51,9 +91,40 @@ async def update_settings(req: RuntimeSettings):
         value = max(CONCURRENCY_MIN, min(CONCURRENCY_MAX, int(req.sync_concurrency)))
         await db.db_set_setting(CONCURRENCY_SETTING_KEY, str(value))
         result["sync_concurrency"] = value
+
+    if req.notify is not None:
+        n = req.notify
+        if n.enabled is not None:
+            await db.db_set_setting(ENABLED_KEY, "1" if n.enabled else "0")
+        if n.url is not None:
+            await db.db_set_setting(URL_KEY, n.url.strip())
+        # 空字符串 = 保持原值。界面上回显的是打码后的 token，如果照原样
+        # 提交回来会把真实 token 覆盖成 "abc******xyz"。
+        if n.token:
+            await db.db_set_setting(TOKEN_KEY, n.token.strip())
+        if n.quiet is not None:
+            quiet = max(QUIET_MIN, min(QUIET_MAX, int(n.quiet)))
+            await db.db_set_setting(QUIET_KEY, str(quiet))
+        if n.insecure is not None:
+            await db.db_set_setting(INSECURE_KEY, "1" if n.insecure else "0")
+        notifier.invalidate_config()
+        result["notify"] = await _notify_payload()
+
     if not result:
         raise HTTPException(400, "No setting provided")
     return result
+
+
+@router.post("/notify/test")
+async def notify_test():
+    """按照当前保存的配置立刻发一条测试消息，原样返回网关的响应。"""
+    return await notifier.send_test()
+
+
+@router.get("/notify/status")
+async def notify_status():
+    """当前排队等静默的文件夹 + 最近一次发送结果（排查用）。"""
+    return {**(notifier.snapshot()), "config": await _notify_payload()}
 
 
 @router.get("/traffic")

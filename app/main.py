@@ -77,6 +77,14 @@ async def lifespan(app: FastAPI):
     logger.info("Starting scheduler...")
     await scheduler.start()
 
+    # 同步完成通知：后台每 5 秒看一次，某个文件夹静默满设定秒数就推一条汇总。
+    # start() 只是 create_task，不会阻塞启动。
+    try:
+        from app.services.notify import notifier
+        await notifier.start()
+    except Exception as e:  # noqa: BLE001 - 通知起不来不能影响同步
+        logger.warning(f"Could not start notification service: {e}")
+
     # Cumulative traffic counters live in the settings table; load them before
     # the first dashboard poll so the numbers do not start at zero.
     try:
@@ -91,6 +99,11 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down scheduler...")
     await scheduler.stop()
+    try:
+        from app.services.notify import notifier
+        await notifier.stop()
+    except Exception:  # noqa: BLE001
+        pass
     try:
         from app.services.traffic import traffic
         await traffic.flush()

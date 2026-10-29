@@ -107,6 +107,9 @@ docker compose -f docker-compose.test.yml pull && docker compose -f docker-compo
 | BAUDUSYNC_DOWNLOAD_DIR | /downloads | 下载文件存放目录 |
 | BAUDUSYNC_CONCURRENCY | 3 | 并发同步文件数（界面上可覆盖，见下）|
 | BAUDUSYNC_CHUNK_SIZE | 8388608 | 传输分块大小（字节）|
+| BAUDUSYNC_NOTIFY_URL | (空) | 通知网关地址，如 `https://notify.example.com`（界面上可覆盖）|
+| BAUDUSYNC_NOTIFY_KEY | (空) | 通知网关的分组 token（界面上可覆盖）|
+| BAUDUSYNC_NOTIFY_QUIET | 60 | 文件夹静默多少秒后推送（界面上可覆盖）|
 | BAIDU_APP_KEY | (内置) | 百度网盘 OAuth App Key |
 | BAIDU_APP_SECRET | (内置) | 百度网盘 OAuth App Secret |
 | BAIDU_REDIRECT_URI | oob | OAuth 回调方式 |
@@ -114,6 +117,38 @@ docker compose -f docker-compose.test.yml pull && docker compose -f docker-compo
 **并发上传数量**除了环境变量，还能在「全局设置 → 同步设置」里直接改（1–16）：
 值存在 `settings` 表（键 `sync_concurrency`），**每一轮同步开始时读取**，改完不用重启，
 下一轮生效。环境变量只是没设置过时的默认值——库里一旦有值，以库为准。
+
+### 同步完成通知
+
+在「全局设置 → 同步完成通知」里填网关地址和分组 token，点「保存并发送测试」即可验证。
+
+按**文件夹**推送，不是按任务：同步根目录下的每个一级子文件夹单独统计，
+这个文件夹这一波文件传完、并且静默 N 秒（默认 60）没有新文件后，推送一条汇总：
+
+```
+/sync/1 同步完成
+✅ 同步完成 · 我的同步任务
+上传 10 · 下载 2 · 无变化 3
+3.20 GB · 用时 4分12秒 · 20:06
+```
+
+设计上的几个取舍：
+
+- **只在真的传了文件时推送**。全是「无变化」的文件夹不推，否则实时同步任务
+  每轮扫描都会冒一条「同步完成 0 个文件」。
+- **静默期合并**。拷贝大目录时实时任务会连续触发几十轮扫描，静默期把这一波合并成
+  一条，而不是几十条。
+- **整轮报错立即推**，不参与合并，标题变成「同步失败」并带上错误信息。
+- **通知失败不影响同步**。推送在后台任务里做，网关连不上只会重试 3 次然后放弃，
+  同步状态照常更新。
+
+对接的是 [Heimdallr](https://github.com/LeslieLeung/heimdallr) 的 `POST /push`
+（`{"key","title","body","msg_type":"text"}`）。地址只填到域名，`/push` 会自动补。
+消息一律用 `msg_type=text`：在微信里看企业微信应用消息时，markdown 会显示
+「不支持的消息类型」，只有纯文本正常。
+
+自签 HTTPS 证书连不上时，勾选「跳过证书校验」。
+
 
 下面三个只在 `docker-compose.yml` 里做路径插值（宿主机的卷挂载点），**不传入容器**：
 

@@ -18,6 +18,7 @@ from typing import Optional, Callable
 from app.providers.base import CloudProvider, FileInfo
 from app import database as db
 from app.config import LOCAL_SYNC_ROOT, DOWNLOAD_DIR, SYNC_CONCURRENCY
+from app.services.notify import notifier
 from app.services.retry import retry_async
 from app.services.traffic import traffic
 from app.utils.helpers import get_provider
@@ -74,6 +75,10 @@ class SyncOperation:
     remote_path: str = ""
     file_info: Optional[FileInfo] = None
     reason: str = ""
+    # Path relative to the sync root. Only used for bookkeeping (per-folder
+    # notification counters): SKIP placeholders carry no local_path, so without
+    # this they could not be attributed to the folder they belong to.
+    rel_path: str = ""
 
 
 @dataclass
@@ -315,6 +320,10 @@ class SyncEngine:
         await db.db_add_log(task_id, "info", detail=f"Sync started: {task['name']}")
 
         try:
+            # 提前给默认值：下面除了连接失败还会在更早的地方抛异常，
+            # except 分支里的通知要用到它
+            local_base = ""
+
             # Get provider
             connection = await db.db_get_connection(task["connection_id"])
             if not connection:
@@ -405,6 +414,17 @@ class SyncEngine:
             # skipped_files for every unchanged file, which is how the label
             # ended up reading "63/9 · 100% · 无变化 83".
             work_ops = cls._plan_operations(operations, progress)
+
+            # 「无变化」的文件只计入通知里的数字，永远不会触发推送——否则
+            # 一个安静的文件夹每轮扫描都会冒一条「同步完成 0 个文件」。
+            # 这些是 SKIP 占位符、没有 local_path，靠 rel_path 归类到文件夹。
+            notifier.record_noop(
+                task_id=task_id, task_name=task["name"], local_base=local_base,
+                rel_paths=[op.rel_path for op in operations
+                           if op.action == SyncAction.SKIP
+                           and op.reason == "No changes" and op.rel_path],
+                cycle_started=progress.started_at)
+
             progress.phase = "executing"
             await db.db_add_log(task_id, "info", detail=(
                 f"Found {progress.total_files} operations to execute "
@@ -421,6 +441,31 @@ class SyncEngine:
             concurrency = await cls.get_concurrency()
             semaphore = asyncio.Semaphore(concurrency)
 
+            def _track(op: SyncOperation, ok: bool) -> None:
+                """把一个文件的结果计入通知汇总。
+
+                纯内存操作，同步引擎照常往下跑；真正的 HTTP 推送在通知服务
+                的后台任务里做，网关挂了也不会影响同步。
+                """
+                if op.action in (SyncAction.MKDIR_LOCAL, SyncAction.MKDIR_REMOTE):
+                    return  # 建目录不算「传了东西」
+                try:
+                    if op.local_path:
+                        rel = cls._rel_path(op.local_path, local_base)
+                    elif op.remote_path:
+                        rel = cls._rel_path(op.remote_path, remote_base)
+                    else:
+                        return
+                    notifier.record(
+                        task_id=task_id, task_name=task["name"],
+                        local_base=local_base, rel_path=rel,
+                        action=op.action.value, ok=ok,
+                        size=(op.file_info.size or 0) if op.file_info else 0,
+                        cycle_started=progress.started_at)
+                except Exception:  # noqa: BLE001 - 统计不能拖垮同步
+                    logger.debug("notify track failed for %s", op.local_path,
+                                 exc_info=True)
+
             async def _run_one(op: SyncOperation):
                 try:
                     result = await cls._execute_op(
@@ -431,9 +476,11 @@ class SyncEngine:
                     raise
                 except Exception as exc:  # noqa: BLE001 - _execute_op already logged it
                     progress.failed_files += 1
+                    _track(op, ok=False)
                     return exc
                 if result == "success":
                     progress.processed_files += 1
+                    _track(op, ok=True)
                 elif result == "skipped":
                     progress.skipped_files += 1
                 return result
@@ -494,6 +541,14 @@ class SyncEngine:
                 bytes_transferred=progress.transferred_bytes
             )
             await db.db_add_log(task_id, "error", detail=f"Sync error: {error_msg}")
+            # 整轮报错：这个任务待推送的文件夹立刻发出去（带上错误信息），
+            # 不再等静默期——传到一半断了更要马上让人知道。
+            try:
+                notifier.abort_task(task_id, error_msg,
+                                    local_base=local_base or task["local_path"],
+                                    task_name=task["name"])
+            except Exception:  # noqa: BLE001
+                logger.debug("notify abort failed", exc_info=True)
 
         finally:
             progress.is_running = False
@@ -623,7 +678,7 @@ class SyncEngine:
                                 reason="Conflict resolved: remote is newer"
                             ))
                     else:
-                        operations.append(SyncOperation(action=SyncAction.SKIP, reason="No changes"))
+                        operations.append(SyncOperation(action=SyncAction.SKIP, reason="No changes", rel_path=rel_path))
                 elif local_file and not remote_file:
                     if last:
                         # Deleted remotely -> delete locally
@@ -668,7 +723,7 @@ class SyncEngine:
                             reason="Upload sync"
                         ))
                     else:
-                        operations.append(SyncOperation(action=SyncAction.SKIP, reason="No changes"))
+                        operations.append(SyncOperation(action=SyncAction.SKIP, reason="No changes", rel_path=rel_path))
 
             elif sync_mode == "download_only":
                 if remote_file:
@@ -680,7 +735,7 @@ class SyncEngine:
                             reason="Download sync"
                         ))
                     else:
-                        operations.append(SyncOperation(action=SyncAction.SKIP, reason="No changes"))
+                        operations.append(SyncOperation(action=SyncAction.SKIP, reason="No changes", rel_path=rel_path))
 
         return operations
 

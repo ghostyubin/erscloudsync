@@ -2481,6 +2481,84 @@ details[open] summary::before { transform: rotate(90deg); }
   background: var(--color-success);
 }
 
+/* --- 同步完成通知：内容比较多，改成上下布局 --- */
+.settings-field-block {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+}
+
+.notify-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 18px;
+}
+
+.notify-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.notify-item > span {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.notify-item-wide {
+  grid-column: 1 / -1;
+}
+
+.notify-item .settings-number {
+  width: 100%;
+  text-align: left;
+}
+
+.notify-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.notify-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.notify-check input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.notify-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.notify-result {
+  font-size: 12px;
+  color: var(--text-secondary);
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+.notify-result.ok { color: var(--color-success); }
+.notify-result.err { color: var(--color-error); }
+
+@media (max-width: 720px) {
+  .notify-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
 @media (max-width: 640px) {
   .settings-field {
     flex-direction: column;
