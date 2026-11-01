@@ -32,8 +32,9 @@
 各包裹一份。这就是为什么「密码」和「private.pem」能各自单独解密——两者
 指向的都是同一个 session key，解出来的明文一模一样。
 
-数据本身：先 LZ4 压缩（frame 格式），再 AES-256-CBC + PKCS7 填充，按
-16384 字节切成若干块。每个文件头里还记着明文的 MD5，解密后校验。
+数据本身：先 LZ4 压缩（frame 格式，带 content checksum），再 AES-256-CBC +
+PKCS7 填充，按 **8192** 字节切成若干块（最后一块可以更短）。文件尾记着明文的
+MD5，解密后校验。
 
 安全性的代价（写在这里，也写进 README）
 ------------------------------------
@@ -72,8 +73,11 @@ KIND_STRING = 0x10
 KIND_BYTES = 0x11
 KIND_INT = 0x01
 
-# 群晖当前版本就是 16384（早期文档写 8192，实测样本是 16384）。
-CHUNK_SIZE = 16384
+# 数据块固定 8192 字节（最后一块可以更短）。这是群晖的硬约定：官方解密工具
+# 按 8192 的缓冲区逐块处理，喂给它 16384 的块会直接解不开。
+#   实测样本 5000words-3.1.txt（v3.1）：8192 + 8192 + 8192 + 1984
+#   格式文档："The data values are always 8192 bytes long, except the last one"
+CHUNK_SIZE = 8192
 # 数据密钥固定 32 字节（AES-256），IV 16 字节。
 KEY_SIZE = 32
 IV_SIZE = 16
@@ -372,7 +376,12 @@ def encrypt_file(src: str, dst: str, password: str, public_pem: bytes,
     ])
 
     enc_data = _aes_cbc(data_key, data_iv).encryptor()
-    comp = lz4.frame.LZ4FrameCompressor() if compress else None
+    comp = None
+    if compress:
+        # content_checksum=True 是照着样本来的：群晖生成的 LZ4 frame 的 FLG
+        # 是 0x44（带 content checksum），我们原来写 0x40。解压器通常两种都认，
+        # 但官方工具是拿自己的读法逐位对，能一样就一样。
+        comp = lz4.frame.LZ4FrameCompressor(content_checksum=True)
     written = 0
     pending = bytearray()
 

@@ -272,7 +272,7 @@ KEK 会用 `/config/enc.key`（权限 0600）里的密钥再封一份存进数�
 md5(魔数) 的 32 字节 hex                魔数校验
 { compress, digest, enc_key1, enc_key2, encrypt, file_name,
   key1_hash, key2_hash, salt, session_key_hash, type, version }
-{ data: <16 KiB 密文块>, type: "data" }  × N
+{ data: <8192 字节密文块>, type: "data" }  × N   ← 最后一块可短
 { file_md5, type: "metadata" }
 ```
 
