@@ -251,7 +251,66 @@
                     </div>
                 </section>
 
-                <!-- 系统信息 -->
+                <!-- 客户端加密：只加密内容，文件名和路径不变 -->
+                <section class="settings-section">
+                    <div class="settings-section-header">
+                        <div>
+                            <h2 class="settings-section-title">客户端加密</h2>
+                            <p class="settings-section-desc">
+                                开启加密的任务在上传前先在本地加密，网盘上只有密文，<strong>文件名和目录结构保持原样</strong>。
+                                下载时自动识别并解密，不需要手动操作。
+                            </p>
+                        </div>
+                        <span class="settings-badge" id="setting-crypto-state">未设置</span>
+                    </div>
+
+                    <div class="settings-field settings-field-block">
+                        <div class="settings-field-info">
+                            <p class="settings-field-desc">
+                                <strong>密码忘了就永远解不开</strong>，没有找回途径。密码经 scrypt 派生后只用来包裹每个任务的密钥，
+                                所以<strong>改密码不需要重新上传任何文件</strong>。为了让 NAS 重启后能自动继续同步，
+                                解锁用的密钥文件存在 <code>/config/enc.key</code>——备份数据库时请把它一起备份。
+                            </p>
+                        </div>
+
+                        <div class="notify-grid" id="setting-crypto-forms">
+                            <div class="notify-item notify-item-wide" id="setting-crypto-setup-row">
+                                <span>设置加密密码（至少 8 位）</span>
+                                <input type="password" id="setting-crypto-password" class="input"
+                                       placeholder="记住它，丢了数据就找不回来了" autocomplete="new-password">
+                            </div>
+                            <div class="notify-item notify-item-wide" id="setting-crypto-unlock-row" style="display:none;">
+                                <span>输入密码解锁</span>
+                                <input type="password" id="setting-crypto-unlock" class="input"
+                                       placeholder="密钥文件丢了或已锁定，需要手动解锁" autocomplete="new-password">
+                            </div>
+                            <div class="notify-item notify-item-wide" id="setting-crypto-change-row" style="display:none;">
+                                <span>更改密码（文件不用重传）</span>
+                                <div style="display:flex; gap:10px;">
+                                    <input type="password" id="setting-crypto-old" class="input"
+                                           placeholder="原密码" autocomplete="new-password">
+                                    <input type="password" id="setting-crypto-new" class="input"
+                                           placeholder="新密码，至少 8 位" autocomplete="new-password">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="notify-actions">
+                            <button class="btn btn-primary settings-save" id="setting-crypto-setup-btn"
+                                    onclick="app.setupCrypto()">设置密码</button>
+                            <button class="btn btn-primary settings-save" id="setting-crypto-unlock-btn"
+                                    onclick="app.unlockCrypto()" style="display:none;">解锁</button>
+                            <button class="btn btn-secondary settings-save" id="setting-crypto-change-btn"
+                                    onclick="app.toggleCryptoChange()" style="display:none;">更改密码</button>
+                            <button class="btn btn-primary settings-save" id="setting-crypto-change-confirm"
+                                    onclick="app.changeCryptoPassword()" style="display:none;">确认更改</button>
+                            <button class="btn btn-secondary settings-save" id="setting-crypto-lock-btn"
+                                    onclick="app.lockCrypto()" style="display:none;">锁定</button>
+                            <span class="notify-result" id="setting-crypto-result"></span>
+                        </div>
+                    </div>
+                </section>
+
                 <section class="settings-section">
                     <div class="settings-section-header">
                         <div>
@@ -664,6 +723,18 @@
             <div class="form-group">
                 <label>最大文件大小 (MB, 0=不限制)</label>
                 <input type="number" id="task-max-size" class="input" value="0" min="0">
+            </div>
+            <div class="form-group">
+                <label class="notify-check" style="font-weight:500;">
+                    <input type="checkbox" id="task-enc-enabled"> 加密上传
+                </label>
+                <p class="settings-field-desc" style="margin-top:6px;">
+                    上传前在本地加密，网盘上只有密文，文件名和路径保持不变。
+                    <strong>只影响之后新传的文件</strong>，云端已有的明文文件不会重传，下载时原样取回。
+                </p>
+                <p class="settings-field-desc" id="task-enc-warn" style="display:none;color:var(--color-danger);margin-top:4px;">
+                    还没有设置加密密码，请先到「全局设置 → 客户端加密」设置。
+                </p>
             </div>
             <div class="form-group" id="task-ignored-group" style="display:none;">
                 <label>已忽略的文件 <span class="text-muted" style="font-weight:400">（不再参与同步）</span></label>

@@ -830,7 +830,8 @@ const App = {
             return `
                 <div class="task-item">
                     <div class="task-item-info">
-                        <div class="task-item-name">${this.escape(t.name)}</div>
+                        <div class="task-item-name">${this.escape(t.name)}${
+                            t.enc_enabled ? ' <span class="badge-enc">🔒 加密</span>' : ''}</div>
                         <div class="task-item-detail">
                             <span>📁 ${this.escape(t.local_path || '/')}</span>
                             <span>☁️ ${this.escape(t.connection_name || '')} → ${this.escape(t.remote_path || '/')}</span>
@@ -864,6 +865,8 @@ const App = {
         document.getElementById('task-include').value = '';
         document.getElementById('task-exclude').value = '';
         document.getElementById('task-max-size').value = '0';
+        document.getElementById('task-enc-enabled').checked = false;
+        document.getElementById('task-enc-warn').style.display = 'none';
         document.getElementById('task-interval').value = '30';
         document.querySelector('input[name="sync-mode"][value="bidirectional"]').checked = true;
         document.querySelector('input[name="schedule-type"][value="scheduled"]').checked = true;
@@ -875,6 +878,7 @@ const App = {
                 data.connections.map(c => `<option value="${c.id}">${this.escape(c.name)} (${c.type})</option>`).join('');
         } catch (e) { this.toast('加载连接失败', 'error'); }
         document.getElementById('task-ignored-group').style.display = 'none';
+        await this.loadCryptoSettings();
         this.openModal('modal-task');
     },
 
@@ -889,6 +893,8 @@ const App = {
         document.getElementById('task-include').value = task.filter_include || '';
         document.getElementById('task-exclude').value = task.filter_exclude || '';
         document.getElementById('task-max-size').value = task.max_file_size || 0;
+        document.getElementById('task-enc-enabled').checked = !!task.enc_enabled;
+        document.getElementById('task-enc-warn').style.display = 'none';
         document.getElementById('task-interval').value = (task.schedule_interval || 1800) / 60;
         const syncMode = document.querySelector(`input[name="sync-mode"][value="${task.sync_mode}"]`);
         if (syncMode) syncMode.checked = true;
@@ -902,6 +908,7 @@ const App = {
                 data.connections.map(c => `<option value="${c.id}" ${c.id === task.connection_id ? 'selected' : ''}>${this.escape(c.name)} (${c.type})</option>`).join('');
         } catch (e) {}
         await this._renderIgnoredList(id);
+        await this.loadCryptoSettings();
         this.openModal('modal-task');
     },
 
@@ -916,6 +923,12 @@ const App = {
         const include = document.getElementById('task-include').value.trim();
         const exclude = document.getElementById('task-exclude').value.trim();
         const maxSizeMB = parseInt(document.getElementById('task-max-size').value) || 0;
+        const encEnabled = !!document.getElementById('task-enc-enabled').checked;
+        if (encEnabled && !this.cryptoReady) {
+            document.getElementById('task-enc-warn').style.display = 'block';
+            this.toast('请先到「全局设置 → 客户端加密」设置密码', 'warning');
+            return;
+        }
         if (!name || !connectionId || !localPath) { this.toast('请填写名称、连接和本地目录', 'warning'); return; }
         const payload = {
             name, connection_id: connectionId, local_path: localPath, remote_path: remotePath,
@@ -923,6 +936,7 @@ const App = {
             schedule_interval: scheduleType === 'scheduled' ? intervalMin * 60 : 0,
             filter_include: include, filter_exclude: exclude,
             max_file_size: maxSizeMB * 1024 * 1024,
+            enc_enabled: encEnabled,
         };
         try {
             if (this.editingTaskId) {
@@ -1292,6 +1306,7 @@ const App = {
             }
             if (s && s.notify) this._applyNotifySettings(s.notify, s.limits || {});
         } catch (e) { /* settings optional */ }
+        this.loadCryptoSettings();
         await connPromise;
     },
 
@@ -1333,6 +1348,134 @@ const App = {
             digestHours.min = lim.min;
             digestHours.max = lim.max;
             digestHours.value = n.digest_hours == null ? 6 : n.digest_hours;
+        }
+    },
+
+    /* ---- 客户端加密 ---- */
+    async loadCryptoSettings() {
+        try {
+            this._applyCryptoState(await this.api('GET', '/api/system/crypto'));
+        } catch (e) { /* 加密状态拿不到不该影响其它设置 */ }
+    },
+
+    _applyCryptoState(st) {
+        if (!st) return;
+        const el = id => document.getElementById(id);
+        const badge = el('setting-crypto-state');
+        const initialized = !!st.initialized;
+        const unlocked = !!st.unlocked;
+        // 任务表单要用它决定「加密上传」能不能勾
+        this.cryptoReady = initialized && unlocked;
+
+        const show = (id, on) => { const n = el(id); if (n) n.style.display = on ? '' : 'none'; };
+        // 没设置过密码 → 只给「设置密码」；设置过但锁住 → 只给「解锁」
+        show('setting-crypto-setup-row', !initialized);
+        show('setting-crypto-setup-btn', !initialized);
+        show('setting-crypto-unlock-row', initialized && !unlocked);
+        show('setting-crypto-unlock-btn', initialized && !unlocked);
+        show('setting-crypto-lock-btn', initialized && unlocked);
+        show('setting-crypto-change-btn', initialized && unlocked);
+
+        if (badge) {
+            let text = '未设置', color = 'var(--text-secondary)';
+            if (initialized && unlocked) { text = '已启用'; color = 'var(--color-success)'; }
+            else if (initialized) { text = '已锁定'; color = 'var(--color-warning)'; }
+            if (st.tasks) text += ` · ${st.tasks} 个任务`;
+            badge.textContent = text;
+            badge.style.color = color;
+        }
+    },
+
+    _cryptoResult(msg, ok) {
+        const out = document.getElementById('setting-crypto-result');
+        if (!out) return;
+        out.textContent = msg || '';
+        out.style.color = ok ? 'var(--color-success)' : 'var(--color-danger)';
+    },
+
+    async setupCrypto() {
+        const input = document.getElementById('setting-crypto-password');
+        const pw = ((input && input.value) || '').trim();
+        if (pw.length < 8) {
+            this._cryptoResult('密码至少 8 位', false);
+            if (input) input.focus();
+            return;
+        }
+        if (!confirm('密码忘了就再也解不开云端的加密文件，本产品没有找回途径。\n\n确定用这个密码吗？')) return;
+        const btn = document.getElementById('setting-crypto-setup-btn');
+        if (btn) btn.disabled = true;
+        try {
+            const r = await this.api('POST', '/api/system/crypto/setup', { password: pw });
+            if (input) input.value = '';
+            this._applyCryptoState(r.state);
+            this._cryptoResult('已设置，重启后会自动继续同步', true);
+            this.toast('加密密码已设置', 'success');
+        } catch (e) {
+            this._cryptoResult(e.message, false);
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    },
+
+    async unlockCrypto() {
+        const input = document.getElementById('setting-crypto-unlock');
+        const pw = ((input && input.value) || '').trim();
+        if (!pw) { this._cryptoResult('请输入密码', false); return; }
+        const btn = document.getElementById('setting-crypto-unlock-btn');
+        if (btn) btn.disabled = true;
+        try {
+            const r = await this.api('POST', '/api/system/crypto/unlock', { password: pw });
+            if (input) input.value = '';
+            this._applyCryptoState(r.state);
+            this._cryptoResult(r.message || '已解锁', true);
+        } catch (e) {
+            this._cryptoResult(e.message, false);
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    },
+
+    toggleCryptoChange() {
+        const row = document.getElementById('setting-crypto-change-row');
+        const confirmBtn = document.getElementById('setting-crypto-change-confirm');
+        const open = !row || row.style.display === 'none';
+        if (row) row.style.display = open ? '' : 'none';
+        if (confirmBtn) confirmBtn.style.display = open ? '' : 'none';
+        this._cryptoResult('', true);
+    },
+
+    async changeCryptoPassword() {
+        const oldEl = document.getElementById('setting-crypto-old');
+        const newEl = document.getElementById('setting-crypto-new');
+        const oldPw = ((oldEl && oldEl.value) || '').trim();
+        const newPw = ((newEl && newEl.value) || '').trim();
+        if (!oldPw) { this._cryptoResult('请输入原密码', false); return; }
+        if (newPw.length < 8) { this._cryptoResult('新密码至少 8 位', false); return; }
+        const btn = document.getElementById('setting-crypto-change-confirm');
+        if (btn) btn.disabled = true;
+        try {
+            const r = await this.api('POST', '/api/system/crypto/password',
+                                     { old: oldPw, new: newPw });
+            if (oldEl) oldEl.value = '';
+            if (newEl) newEl.value = '';
+            this.toggleCryptoChange();
+            this._applyCryptoState(r.state);
+            this._cryptoResult(r.message || '密码已更换', true);
+        } catch (e) {
+            this._cryptoResult(e.message, false);
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    },
+
+    async lockCrypto() {
+        if (!confirm('锁定后加密任务会停下，直到你重新输入密码。要继续吗？')) return;
+        try {
+            const r = await this.api('POST', '/api/system/crypto/lock');
+            this._applyCryptoState(r.state);
+            this._cryptoResult(r.message, true);
+        } catch (e) {
+            this._cryptoResult(e.message, false);
         }
     },
 

@@ -18,6 +18,7 @@ from typing import Optional, Callable
 from app.providers.base import CloudProvider, FileInfo
 from app import database as db
 from app.config import LOCAL_SYNC_ROOT, DOWNLOAD_DIR, SYNC_CONCURRENCY
+from app.services import crypto
 from app.services.notify import notifier
 from app.services.retry import retry_async
 from app.services.traffic import traffic
@@ -470,7 +471,7 @@ class SyncEngine:
                 try:
                     result = await cls._execute_op(
                         op, provider, task_id, semaphore, progress,
-                        local_base, remote_base, record_ctx)
+                        local_base, remote_base, record_ctx, task=task)
                 except asyncio.CancelledError:
                     progress.skipped_files += 1
                     raise
@@ -629,7 +630,7 @@ class SyncEngine:
                 local_changed = True  # New file
 
             if remote_file and last:
-                if remote_file.size != last.get("file_size", 0):
+                if not cls._remote_size_matches(remote_file.size, last):
                     remote_changed = True
                 else:
                     last_md5 = (last.get("file_md5") or "").strip()
@@ -739,12 +740,28 @@ class SyncEngine:
 
         return operations
 
+    @staticmethod
+    def _remote_size_matches(remote_size: int, rec: dict) -> bool:
+        """判断云端大小是否等于上次同步后记录的样子。
+
+        加密任务里云端是密文，比本地明文大（头 + 每块 16 字节 tag），拿
+        ``remote_size`` 直接跟本地 ``file_size`` 比会每轮都判「云端变了」，
+        双向模式下就会无限下载。所以优先比对实际观测到的云端大小；老记录
+        没有这个列时，明文和密文两种可能都算「没变」。
+        """
+        stored = int(rec.get("remote_size") or 0)
+        if stored:
+            return remote_size == stored
+        plain = int(rec.get("file_size") or 0)
+        return remote_size in (plain, crypto.encrypted_size(plain))
+
     @classmethod
     async def _execute_op(cls, op: SyncOperation, provider: CloudProvider,
                           task_id: int, semaphore: asyncio.Semaphore,
                           progress: SyncProgress, local_base: str,
                           remote_base: str,
-                          record_ctx: Optional[dict] = None) -> str:
+                          record_ctx: Optional[dict] = None,
+                          task: Optional[dict] = None) -> str:
         """Execute a single sync operation.
 
         Returns "success" / "skipped" (or raises). Progress counters are bumped
@@ -806,15 +823,35 @@ class SyncEngine:
                             # counted from the failed attempt.
                             transfer.transferred = 0
 
-                        await retry_async(
-                            lambda: provider.upload_file(
-                                op.local_path, op.remote_path,
-                                progress_callback=cls._make_callback(
-                                    progress, transfer_id, task_id),
-                                _transfer=transfer),
-                            what=f"upload {os.path.basename(op.local_path)}",
-                            on_retry=_reset_progress,
-                        )
+                        # 加密任务：先把明文加密成中转文件，再把中转文件交给
+                        # provider。百度要每个 4MB 分片的 md5、115 要整文件
+                        # SHA1，都必须先有完整密文才能算哈希，所以没法边加密
+                        # 边上传——这一步是加密同步必然多出来的一遍磁盘 IO。
+                        try:
+                            staged = await crypto.encrypt_for_upload(
+                                task, op.local_path)
+                        except crypto.CryptoError as exc:
+                            await db.db_add_log(task_id, "error", op.remote_path,
+                                                f"加密失败：{exc}")
+                            raise
+                        upload_src = staged or op.local_path
+                        try:
+                            await retry_async(
+                                lambda: provider.upload_file(
+                                    upload_src, op.remote_path,
+                                    progress_callback=cls._make_callback(
+                                        progress, transfer_id, task_id),
+                                    _transfer=transfer),
+                                what=f"upload {os.path.basename(op.local_path)}",
+                                on_retry=_reset_progress,
+                            )
+                        finally:
+                            if staged:
+                                crypto.remove_temp(staged)
+                        # 云端实际存了多少字节：加密时是密文大小，普通任务就是
+                        # 明文大小。下一轮靠它判断「云端有没有变」。
+                        uploaded_size = (crypto.encrypted_size(file_size)
+                                         if staged else file_size)
                         # Pop before counting: the live per-direction totals
                         # must never hold the same bytes twice in one sample.
                         progress.active_transfers.pop(transfer_id, None)
@@ -839,7 +876,8 @@ class SyncEngine:
                             st = os.stat(op.local_path)
                             await db.db_upsert_sync_state(
                                 task_id, cls._rel_path(op.local_path, local_base),
-                                st.st_size, st.st_mtime, "", "local")
+                                st.st_size, st.st_mtime, "", "local",
+                                remote_size=uploaded_size)
                         except OSError:
                             pass
                         return "success"
@@ -874,14 +912,23 @@ class SyncEngine:
                         def _reset_progress(_attempt_no, _exc):
                             transfer.transferred = 0
 
-                        await retry_async(
-                            lambda: provider.download_file(
-                                op.remote_path, op.local_path,
-                                progress_callback=cls._make_callback(
-                                    progress, transfer_id, task_id)),
-                            what=f"download {os.path.basename(op.remote_path)}",
-                            on_retry=_reset_progress,
-                        )
+                        # 先下到中转文件：文件名不变，所以要读文件头的魔数才能
+                        # 判断是不是密文；顺带保证解密失败时不会把目标文件写坏。
+                        staged = op.local_path + crypto.SUFFIX_CIPHER
+                        try:
+                            await retry_async(
+                                lambda: provider.download_file(
+                                    op.remote_path, staged,
+                                    progress_callback=cls._make_callback(
+                                        progress, transfer_id, task_id)),
+                                what=f"download {os.path.basename(op.remote_path)}",
+                                on_retry=_reset_progress,
+                            )
+                            # 只有真的是密文才会去枚举密钥
+                            await crypto.settle_download(staged, op.local_path,
+                                                         task=task)
+                        finally:
+                            crypto.remove_temp(staged)
                         done_size = os.path.getsize(op.local_path)
                         progress.active_transfers.pop(transfer_id, None)
                         progress.transferred_bytes += done_size
@@ -907,7 +954,8 @@ class SyncEngine:
                                 task_id, cls._rel_path(op.local_path, local_base),
                                 st.st_size, st.st_mtime,
                                 (op.file_info.md5 if op.file_info else "") or "",
-                                "both")
+                                "both",
+                                remote_size=file_size)
                         except OSError:
                             pass
                         return "success"
@@ -1082,7 +1130,8 @@ class SyncEngine:
                 except OSError:
                     pass
                 await db.db_upsert_sync_state(
-                    task_id, rel_path, size, mtime, remote_md5, "both")
+                    task_id, rel_path, size, mtime, remote_md5, "both",
+                    remote_size=remote_file.size)
             elif local_file:
                 size, mtime = local_file.size, local_file.modify_time
                 try:
@@ -1091,11 +1140,12 @@ class SyncEngine:
                 except OSError:
                     pass
                 await db.db_upsert_sync_state(
-                    task_id, rel_path, size, mtime, "", "local")
+                    task_id, rel_path, size, mtime, "", "local",
+                    remote_size=None)   # 这一轮的快照里没有云端，别冲掉刚记的值
             elif remote_file:
                 await db.db_upsert_sync_state(
                     task_id, rel_path, remote_file.size, remote_file.modify_time,
-                    remote_md5, "remote")
+                    remote_md5, "remote", remote_size=remote_file.size)
 
     @staticmethod
     def _resolve_local_base(local_path: str) -> str:

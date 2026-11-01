@@ -94,6 +94,17 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Could not load traffic counters: {e}")
 
     logger.info(f"BauduSync ready at http://{WEB_HOST}:{WEB_PORT}")
+
+    # 加密中转文件的残骸清理：只在上次被 kill 时才会留下。放到后台跑，
+    # 大目录树扫描不该拖慢启动。
+    try:
+        from app.config import DOWNLOAD_DIR
+        from app.services import crypto
+        asyncio.create_task(asyncio.to_thread(
+            crypto.cleanup_stale, [str(LOCAL_SYNC_ROOT), str(DOWNLOAD_DIR)]))
+    except Exception as e:  # noqa: BLE001 - 清理失败不影响任何功能
+        logger.warning(f"Could not schedule crypto temp cleanup: {e}")
+
     yield
 
     # Shutdown

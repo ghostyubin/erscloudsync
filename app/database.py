@@ -64,6 +64,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     filter_exclude TEXT DEFAULT '',
     max_file_size INTEGER DEFAULT 0,
     delete_after_sync INTEGER DEFAULT 0,
+    -- 客户端加密：只加密内容，文件名和路径不变。enc_wrapped 是用全局 KEK
+    -- 包裹后的任务密钥（base64），第一次上传时才生成。
+    enc_enabled INTEGER DEFAULT 0,
+    enc_wrapped TEXT DEFAULT '',
+    enc_key_id INTEGER DEFAULT 0,
     status TEXT DEFAULT 'idle'
         CHECK(status IN ('idle', 'running', 'paused', 'error', 'success')),
     last_sync_at REAL,
@@ -81,6 +86,9 @@ CREATE TABLE IF NOT EXISTS sync_state (
     file_size INTEGER DEFAULT 0,
     file_mtime REAL DEFAULT 0,
     file_md5 TEXT DEFAULT '',
+    -- 加密任务里云端是密文，大小和本地明文对不上。单存一列记实际观测到的
+    -- 云端大小，否则每轮都会判成「云端变了」→ 双向模式无限下载。
+    remote_size INTEGER DEFAULT 0,
     side TEXT DEFAULT 'both'
         CHECK(side IN ('local', 'remote', 'both')),
     synced_at REAL DEFAULT (strftime('%s','now')),
@@ -209,6 +217,10 @@ async def init_db():
         # database that already has it.
         for stmt in (
             "ALTER TABLE sync_records ADD COLUMN retry_count INTEGER DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN enc_enabled INTEGER DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN enc_wrapped TEXT DEFAULT ''",
+            "ALTER TABLE tasks ADD COLUMN enc_key_id INTEGER DEFAULT 0",
+            "ALTER TABLE sync_state ADD COLUMN remote_size INTEGER DEFAULT 0",
         ):
             try:
                 await db.execute(stmt)
@@ -331,6 +343,7 @@ async def db_create_task(**kwargs):
         "name", "connection_id", "local_path", "remote_path", "sync_mode",
         "schedule_type", "schedule_interval", "filter_include", "filter_exclude",
         "max_file_size", "delete_after_sync",
+        "enc_enabled", "enc_wrapped", "enc_key_id",
     }
     cols = []
     vals = []
@@ -425,18 +438,29 @@ async def db_get_sync_state_entry(task_id: int, file_path: str) -> Optional[dict
 
 
 async def db_upsert_sync_state(task_id: int, file_path: str, file_size: int,
-                                file_mtime: float, file_md5: str = "", side: str = "both"):
+                                file_mtime: float, file_md5: str = "",
+                                side: str = "both",
+                                remote_size: Optional[int] = None):
+    """``remote_size=None`` 表示「这一轮没看到云端，别动已记的值」。
+
+    上传完成时会立刻写一次准确的云端大小，紧接着周期末的状态回写用的却是
+    传输前的快照——那一轮云端还没有这个文件。如果这里无条件写 0，就会把刚
+    记下的值冲掉。所以用 COALESCE 让 None 变成「保留原值」。
+    """
     async with aiosqlite.connect(str(DB_PATH)) as db:
         await db.execute(
-            """INSERT INTO sync_state (task_id, file_path, file_size, file_mtime, file_md5, side, synced_at)
-               VALUES (?, ?, ?, ?, ?, ?, strftime('%s','now'))
+            """INSERT INTO sync_state (task_id, file_path, file_size, file_mtime,
+                                       file_md5, side, remote_size, synced_at)
+               VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), strftime('%s','now'))
                ON CONFLICT(task_id, file_path) DO UPDATE SET
                  file_size=excluded.file_size,
                  file_mtime=excluded.file_mtime,
                  file_md5=excluded.file_md5,
                  side=excluded.side,
+                 remote_size=COALESCE(?, sync_state.remote_size),
                  synced_at=strftime('%s','now')""",
-            (task_id, file_path, file_size, file_mtime, file_md5, side),
+            (task_id, file_path, file_size, file_mtime, file_md5, side,
+             remote_size, remote_size),
         )
         await db.commit()
 

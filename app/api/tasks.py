@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from app import database as db
+from app.services import crypto
 from app.services.sync_engine import SyncEngine
 from app.services.scheduler import scheduler
 from app.config import LOCAL_SYNC_ROOT
@@ -92,6 +93,7 @@ class CreateTaskRequest(BaseModel):
     filter_exclude: str = ""
     max_file_size: int = 0
     delete_after_sync: int = 0
+    enc_enabled: bool = False
 
 
 class UpdateTaskRequest(BaseModel):
@@ -105,6 +107,7 @@ class UpdateTaskRequest(BaseModel):
     filter_exclude: Optional[str] = None
     max_file_size: Optional[int] = None
     delete_after_sync: Optional[int] = None
+    enc_enabled: Optional[bool] = None
     status: Optional[str] = None
 
 
@@ -140,6 +143,9 @@ async def create_task(req: CreateTaskRequest):
     if not conn:
         raise HTTPException(404, "Connection not found")
 
+    if req.enc_enabled and not await crypto.keyring.initialized():
+        raise HTTPException(400, "请先在「全局设置 → 客户端加密」里设置密码")
+
     task_id = await db.db_create_task(
         name=req.name,
         connection_id=req.connection_id,
@@ -152,6 +158,7 @@ async def create_task(req: CreateTaskRequest):
         filter_exclude=req.filter_exclude,
         max_file_size=req.max_file_size,
         delete_after_sync=req.delete_after_sync,
+        enc_enabled=1 if req.enc_enabled else 0,
     )
 
     # Schedule the task
@@ -169,6 +176,11 @@ async def update_task(task_id: int, req: UpdateTaskRequest):
         raise HTTPException(404, "Task not found")
 
     updates = {k: v for k, v in req.model_dump().items() if v is not None}
+    if "enc_enabled" in updates:
+        enabled = bool(updates["enc_enabled"])
+        if enabled and not await crypto.keyring.initialized():
+            raise HTTPException(400, "请先在「全局设置 → 客户端加密」里设置密码")
+        updates["enc_enabled"] = 1 if enabled else 0
     if updates:
         await db.db_update_task(task_id, **updates)
 

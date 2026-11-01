@@ -14,6 +14,7 @@ from typing import Optional
 
 from app import database as db
 from app.config import DOWNLOAD_DIR
+from app.services import crypto
 from app.services.traffic import traffic
 from app.utils.helpers import get_provider
 
@@ -223,10 +224,15 @@ async def _download_single(dl_id: int, provider, remote_path: str,
         traffic.set_live(f"dl:{dl_id}", transferred)
 
     os.makedirs(os.path.dirname(local_path), exist_ok=True)
+    # 加密任务的文件在云端是密文（文件名没变，只能靠读头判断）。先下到中转
+    # 文件，认出是密文就解到目标路径，否则直接改名。
+    staged = local_path + crypto.SUFFIX_CIPHER
     try:
-        await provider.download_file(remote_path, local_path, progress_cb)
+        await provider.download_file(remote_path, staged, progress_cb)
+        await crypto.settle_download(staged, local_path)
     finally:
         traffic.clear_live(f"dl:{dl_id}")
+        crypto.remove_temp(staged)
 
     _progress[dl_id]["transferred"] = total_size
     _progress[dl_id]["processed_files"] = 1
@@ -297,7 +303,12 @@ async def _download_folder(dl_id: int, provider, remote_path: str,
                 _progress[dl_id]["speed"] = speed
             traffic.set_live(f"dl:{dl_id}", transferred + transferred_bytes)
 
-        await provider.download_file(f.path, f_local, progress_cb)
+        staged = f_local + crypto.SUFFIX_CIPHER
+        try:
+            await provider.download_file(f.path, staged, progress_cb)
+            await crypto.settle_download(staged, f_local)
+        finally:
+            crypto.remove_temp(staged)
         transferred += f.size
         processed += 1
         traffic.add("download", f.size)

@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.config import LOCAL_SYNC_ROOT, LOCAL_ROOTS, DOWNLOAD_DIR, DATA_DIR, SYNC_CONCURRENCY
 from app import database as db
+from app.services import crypto
 from app.services.notify import (
     DEVICE_KEY,
     DIGEST_ENABLED_KEY,
@@ -285,3 +286,69 @@ async def list_local_dirs(path: str = "", root: str = ""):
         "root_label": "下载目录" if root == "downloads" else "同步目录",
         "entries": entries,
     }
+
+
+# --------------------------------------------------------------------------
+# 客户端加密
+# --------------------------------------------------------------------------
+class CryptoPassword(BaseModel):
+    password: str
+
+
+class CryptoChange(BaseModel):
+    old: str
+    new: str
+
+
+async def _crypto_payload() -> dict:
+    state = await crypto.keyring.status()
+    try:
+        tasks = await db.db_list_tasks()
+    except Exception:  # noqa: BLE001 - 状态展示不该失败
+        tasks = []
+    enc_tasks = [t["name"] for t in tasks if int(t.get("enc_enabled") or 0)]
+    state["tasks"] = len(enc_tasks)
+    state["task_names"] = enc_tasks[:5]
+    return state
+
+
+@router.get("/crypto")
+async def crypto_status():
+    """加密是否已设置、是否已解锁、有几个任务在用。"""
+    return await _crypto_payload()
+
+
+@router.post("/crypto/setup")
+async def crypto_setup(req: CryptoPassword):
+    try:
+        result = await crypto.keyring.setup(req.password)
+    except crypto.CryptoError as exc:
+        raise HTTPException(400, str(exc))
+    return {**result, "state": await _crypto_payload()}
+
+
+@router.post("/crypto/unlock")
+async def crypto_unlock(req: CryptoPassword):
+    try:
+        result = await crypto.keyring.unlock(req.password)
+    except crypto.CryptoError as exc:
+        raise HTTPException(400, str(exc))
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("message") or "密码不正确")
+    return {**result, "state": await _crypto_payload()}
+
+
+@router.post("/crypto/lock")
+async def crypto_lock():
+    return {**await crypto.keyring.lock(), "state": await _crypto_payload()}
+
+
+@router.post("/crypto/password")
+async def crypto_change_password(req: CryptoChange):
+    try:
+        result = await crypto.keyring.change_password(req.old, req.new)
+    except crypto.CryptoError as exc:
+        raise HTTPException(400, str(exc))
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("message") or "修改失败")
+    return {**result, "state": await _crypto_payload()}
