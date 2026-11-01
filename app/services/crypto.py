@@ -49,7 +49,8 @@ from app.version import APP_VERSION
 logger = logging.getLogger(__name__)
 
 MAGIC = b"BSENC"
-VERSION = 1
+VERSION = 2
+MIN_VERSION = 1
 # <magic 5s><ver B><flags B><key_id B><chunk I><nonce prefix 8s><plain size Q><保留 20s>
 HEADER = struct.Struct("<5sBBBI8sQ20s")
 HEADER_SIZE = HEADER.size  # 48
@@ -58,6 +59,13 @@ TAG_SIZE = 16
 KEY_SIZE = 32
 MAX_CHUNK = 64 * 1024 * 1024
 
+# 文件头后面可选的一段「钥匙牌」，见 build_key_block() 的说明。
+FLAG_KEYBLOCK = 0x02
+# <task id I><salt 16s><wrapped len H>
+KEYBLOCK = struct.Struct("<I16sH")
+KEYBLOCK_HEAD = 2
+KEYBLOCK_SIZE = KEYBLOCK_HEAD + KEYBLOCK.size + 12 + KEY_SIZE + TAG_SIZE  # 84
+
 # 中转文件后缀都以 .part 结尾，扫描器会忽略它们
 SUFFIX_CIPHER = ".bsenc.part"
 SUFFIX_PLAIN = ".bsenc.dec.part"
@@ -65,6 +73,8 @@ SUFFIX_PLAIN = ".bsenc.dec.part"
 SALT_KEY = "crypto_salt"
 VERIFIER_KEY = "crypto_verifier"
 SEALED_KEY = "crypto_sealed_kek"
+# 文件头里是否附带「钥匙牌」（让只凭密码也能解密）。默认开，和 Synology 一致。
+INCLUDE_BLOCK_KEY = "crypto_include_keyblock"
 VERIFY_PLAIN = b"bsenc-verify-v1"
 KEYFILE = DATA_DIR / "enc.key"
 
@@ -96,14 +106,49 @@ class DecryptError(CryptoError):
 # --------------------------------------------------------------------------
 # 文件格式
 # --------------------------------------------------------------------------
-def encrypted_size(plain_size: int) -> int:
-    """密文大小 = 头 + 明文 + 每块 16 字节认证标签。
+def encrypted_size(plain_size: int, key_block: bool = True) -> int:
+    """密文大小 = 头 +（钥匙牌）+ 明文 + 每块 16 字节认证标签。
 
-    空文件也会写一个「0 长度明文」的标签，所以最小密文是 64 字节。这个标签
+    空文件也会写一个「0 长度明文」的标签，所以空文件也有一块。那个标签
     唯一的用处是拿头当 AAD 认证一遍——否则空文件的头谁都能改，而不被察觉。
     """
     blocks = max(1, (plain_size + CHUNK_SIZE - 1) // CHUNK_SIZE)
-    return HEADER_SIZE + plain_size + TAG_SIZE * blocks
+    extra = KEYBLOCK_SIZE if key_block else 0
+    return HEADER_SIZE + extra + plain_size + TAG_SIZE * blocks
+
+
+def build_key_block(task_id: int, salt: bytes, wrapped: str) -> bytes:
+    """拼出文件头后面那段「钥匙牌」：任务号 + salt + 被 KEK 包裹的任务密钥。
+
+    放这一段的唯一目的，是让**只凭密码**就能解密——和 Synology 的
+    Cloud Sync Decryption Tool 一样，不需要数据库、也不需要私钥文件。
+    密码 → scrypt(salt) → KEK → 解开这里的 wrapped → 任务密钥 → 解文件。
+
+    代价必须说清楚：云端密文里因此带了一份「可以离线验证密码猜想」的样本。
+    每猜一次都要跑一遍 scrypt（32MB / 0.1 秒级），强密码下不构成实际威胁，
+    但这确实比「云端什么都不给」弱一档。不想要，可以在设置里关掉
+    「文件头附带密钥」（关掉之后就只能用私钥文件或密钥包解密）。
+    """
+    raw = _unb64(wrapped)
+    body = KEYBLOCK.pack(task_id, salt, len(raw)) + raw
+    return struct.pack("<H", len(body)) + body
+
+
+def _parse_key_block(fh) -> Optional[dict]:
+    head = fh.read(KEYBLOCK_HEAD)
+    if len(head) != KEYBLOCK_HEAD:
+        return None
+    (blen,) = struct.unpack("<H", head)
+    if blen < KEYBLOCK.size or blen > 4096:
+        return None
+    body = fh.read(blen)
+    if len(body) != blen:
+        return None
+    task_id, salt, wlen = KEYBLOCK.unpack(body[:KEYBLOCK.size])
+    if KEYBLOCK.size + wlen != blen:
+        return None
+    return {"task_id": task_id, "salt": salt,
+            "wrapped": _b64(body[KEYBLOCK.size:]), "raw": head + body}
 
 
 def is_encrypted(path: str) -> bool:
@@ -120,29 +165,41 @@ def is_encrypted(path: str) -> bool:
     except OSError:
         return False
     header = read_header(path)
-    if not header or header["version"] != VERSION:
+    if not header or not (MIN_VERSION <= header["version"] <= VERSION):
         return False
     chunk = header["chunk_size"]
     return 0 < chunk <= MAX_CHUNK
 
 
 def read_header(path: str) -> Optional[dict]:
+    """读头（含可选的钥匙牌）。返回的 aad / data_offset 解密时要用。"""
     try:
         with open(path, "rb") as fh:
             raw = fh.read(HEADER_SIZE)
+            if len(raw) != HEADER_SIZE:
+                return None
+            magic, version, flags, key_id, chunk, prefix, plain_size, _ = \
+                HEADER.unpack(raw)
+            if magic != MAGIC or version > VERSION:
+                return None
+            block = None
+            aad = raw
+            offset = HEADER_SIZE
+            if (flags & FLAG_KEYBLOCK) and version >= 2:
+                block = _parse_key_block(fh)
+                if not block:
+                    return None
+                aad = raw + block["raw"]
+                offset = HEADER_SIZE + len(block["raw"])
     except OSError:
-        return None
-    if len(raw) != HEADER_SIZE:
-        return None
-    magic, version, flags, key_id, chunk, prefix, plain_size, _ = HEADER.unpack(raw)
-    if magic != MAGIC:
         return None
     return {"version": version, "flags": flags, "key_id": key_id,
             "chunk_size": chunk, "nonce_prefix": prefix,
-            "plain_size": plain_size, "raw": raw}
+            "plain_size": plain_size, "raw": raw,
+            "block": block, "aad": aad, "data_offset": offset}
 
 
-def encrypt_file(src: str, dst: str, key: bytes) -> int:
+def encrypt_file(src: str, dst: str, key: bytes, key_block: bytes = b"") -> int:
     """把 src 加密写到 dst，返回密文字节数。
 
     阻塞调用（纯磁盘 + CPU），调用方用 ``asyncio.to_thread`` 包起来。
@@ -154,14 +211,17 @@ def encrypt_file(src: str, dst: str, key: bytes) -> int:
     """
     plain_size = os.path.getsize(src)
     prefix = secrets.token_bytes(8)
-    header = HEADER.pack(MAGIC, VERSION, 0, 1, CHUNK_SIZE, prefix, plain_size,
-                         b"\x00" * 20)
+    flags = FLAG_KEYBLOCK if key_block else 0
+    header = HEADER.pack(MAGIC, VERSION, flags, 1, CHUNK_SIZE, prefix,
+                         plain_size, b"\x00" * 20)
+    # 钥匙牌也进 AAD：它是承重的（里面有 salt 和包裹的密钥），不能让人改。
+    aad = header + key_block
     aead = AESGCM(key)
-    written = HEADER_SIZE
+    written = HEADER_SIZE + len(key_block)
     index = 0
     remaining = plain_size
     with open(src, "rb") as fin, open(dst, "wb") as fout:
-        fout.write(header)
+        fout.write(aad)
         while remaining > 0:
             want = min(CHUNK_SIZE, remaining)
             data = fin.read(want)
@@ -169,20 +229,21 @@ def encrypt_file(src: str, dst: str, key: bytes) -> int:
                 raise CryptoError("源文件在加密过程中被截断，请等它写完再同步")
             # IV = 文件级随机前缀 + 块序号，所以每块不用单独存 nonce，
             # 同一文件内也不会重复（同密钥下 IV 复用会直接毁掉 GCM）。
-            blob = aead.encrypt(prefix + index.to_bytes(4, "big"), data, header)
+            blob = aead.encrypt(prefix + index.to_bytes(4, "big"), data, aad)
             fout.write(blob)
             written += len(blob)
             index += 1
             remaining -= len(data)
         if plain_size == 0:
             # 空也要一个标签，把头绑上去（否则空文件的头完全不受保护）
-            blob = aead.encrypt(prefix + (0).to_bytes(4, "big"), b"", header)
+            blob = aead.encrypt(prefix + (0).to_bytes(4, "big"), b"", aad)
             fout.write(blob)
             written += len(blob)
-    expected = encrypted_size(plain_size)
+    expected = encrypted_size(plain_size, bool(key_block))
     if written != expected:
         raise CryptoError(f"密文长度异常（{written} != {expected}），源文件在加密时被改过")
     return written
+
 
 
 def decrypt_file(src: str, dst: str, key: bytes) -> int:
@@ -190,18 +251,18 @@ def decrypt_file(src: str, dst: str, key: bytes) -> int:
     header = read_header(src)
     if not header:
         raise NotEncrypted("不是加密文件")
-    if header["version"] != VERSION:
+    if not (MIN_VERSION <= header["version"] <= VERSION):
         raise CryptoError(f"不支持的加密版本 {header['version']}")
     chunk = header["chunk_size"]
     if chunk <= 0 or chunk > MAX_CHUNK:
         raise CryptoError("加密文件头里的分块大小异常")
     plain_size = header["plain_size"]
     prefix = header["nonce_prefix"]
-    raw = header["raw"]
+    raw = header["aad"]          # 头 + 钥匙牌，两者都参与认证
     aead = AESGCM(key)
     done = 0
     with open(src, "rb") as fin, open(dst, "wb") as fout:
-        fin.seek(HEADER_SIZE)
+        fin.seek(header["data_offset"])
         # 空文件这里也要走一遍：blocks 至少为 1，take 为 0，只校验那个标签。
         blocks = max(1, (plain_size + chunk - 1) // chunk)
         for index in range(blocks):
@@ -264,6 +325,7 @@ class Keyring:
     def __init__(self) -> None:
         self._kek: Optional[bytes] = None
         self._deks: dict[int, bytes] = {}
+        self._blocks: dict[int, bytes] = {}
         # 第一次上传时多个文件会同时进来要密钥。不串行化的话每个协程都会
         # 生成一把不同的 DEK 并写库，后写的覆盖先写的——先写那批文件就永远
         # 解不开了（实测并发 3 时会随机坏一个文件）。
@@ -339,6 +401,7 @@ class Keyring:
         await db.db_set_setting(VERIFIER_KEY, _b64(verifier))
         self._kek = kek
         self._deks.clear()
+        self._blocks.clear()
         await self._seal(kek)
         return {"ok": True, "message": "加密密码已设置"}
 
@@ -357,6 +420,7 @@ class Keyring:
             return {"ok": False, "message": "密码不正确"}
         self._kek = kek
         self._deks.clear()
+        self._blocks.clear()
         await self._seal(kek)
         return {"ok": True, "message": "已解锁，之后重启会自动运行"}
 
@@ -448,6 +512,7 @@ class Keyring:
 
         self._kek = new_kek
         self._deks.clear()
+        self._blocks.clear()
         await self._seal(new_kek)
         return {"ok": True,
                 "message": f"密码已更换（{len(unwrapped)} 个任务的密钥已重包裹，文件没有重传）"}
@@ -495,10 +560,74 @@ class Keyring:
             else:
                 dek = _unwrap(kek, packed, task_id)
             self._deks[task_id] = dek
+            self._blocks.pop(task_id, None)     # 密钥变了，钥匙牌要重拼
             return dek
+
+    async def block_for(self, task: dict) -> Optional[bytes]:
+        """拼出写进文件头的「钥匙牌」，让只凭密码也能解密。
+
+        关掉 ``include_key_block`` 设置后返回 None，文件里就只有密文，
+        必须靠私钥文件 / 密钥包 / 数据库才能解开。
+        """
+        if str(await db.db_get_setting(INCLUDE_BLOCK_KEY, "1")).strip().lower() \
+                in ("0", "false", "no", "off"):
+            return None
+        task_id = int(task["id"])
+        cached = self._blocks.get(task_id)
+        if cached:
+            return cached
+        async with self._lock:
+            cached = self._blocks.get(task_id)
+            if cached:
+                return cached
+            fresh = await db.db_get_task(task_id) or task
+            packed = (fresh.get("enc_wrapped") or "").strip()
+            salt = await db.db_get_setting(SALT_KEY, "")
+            if not packed or not salt:
+                return None
+            block = build_key_block(task_id, _unb64(salt), packed)
+            self._blocks[task_id] = block
+            return block
+
+    def task_keyfile(self, task: dict, dek: bytes) -> dict:
+        """一个任务的「私钥文件」内容，对应 Synology 创建任务时给的 private.pem。
+
+        拿到它就不需要密码、不需要数据库，能解开这个任务上传过的所有文件。
+        """
+        return {
+            "format": "bsenc-taskkey",
+            "version": 1,
+            "task_id": int(task["id"]),
+            "task_name": task.get("name") or "",
+            "key_id": 1,
+            "dek": _b64(dek),
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "app_version": APP_VERSION,
+            "note": "这个文件等于该任务全部云端文件的解密权，和密码同等重要。"
+                    "请离线保存；丢了密码时它是唯一的出路。",
+        }
 
     def forget_task(self, task_id: int) -> None:
         self._deks.pop(int(task_id), None)
+        self._blocks.pop(int(task_id), None)
+
+    def forget_blocks(self) -> None:
+        """设置改了之后让钥匙牌缓存失效（不用重新派生 KEK）。"""
+        self._blocks.clear()
+
+    async def verify_password(self, password: str) -> bool:
+        """只校验密码，不改任何状态（导出密钥前用）。"""
+        salt = await db.db_get_setting(SALT_KEY, "")
+        verifier = await db.db_get_setting(VERIFIER_KEY, "")
+        if not salt or not verifier:
+            return False
+        kek = await asyncio.to_thread(_derive, (password or "").strip(),
+                                      _unb64(salt))
+        try:
+            AESGCM(kek).decrypt(b"\x00" * 12, _unb64(verifier), None)
+            return True
+        except InvalidTag:
+            return False
 
 
 keyring = Keyring()
@@ -553,9 +682,10 @@ async def encrypt_for_upload(task: dict, src: str) -> Optional[str]:
     key = await task_key(task)
     if key is None:
         return None
+    block = await keyring.block_for(task) or b""
     staged = src + SUFFIX_CIPHER
     try:
-        size = await asyncio.to_thread(encrypt_file, src, staged, key)
+        size = await asyncio.to_thread(encrypt_file, src, staged, key, block)
     except Exception:
         _remove(staged)
         raise

@@ -111,6 +111,19 @@ class UpdateTaskRequest(BaseModel):
     status: Optional[str] = None
 
 
+class TaskKeyRequest(BaseModel):
+    password: str
+
+
+async def _export_task_key(task_id: int) -> Optional[dict]:
+    """把任务的私钥打包成文件内容（Synology 那个 private.pem 的等价物）。"""
+    task = await db.db_get_task(task_id)
+    if not task or not int(task.get("enc_enabled") or 0):
+        return None
+    dek = await crypto.keyring.dek_for_task(task)
+    return crypto.keyring.task_keyfile(task, dek)
+
+
 @router.get("")
 async def list_tasks():
     tasks = await db.db_list_tasks()
@@ -166,7 +179,19 @@ async def create_task(req: CreateTaskRequest):
     if task:
         await scheduler.schedule_task(task)
 
-    return {"id": task_id, "status": "created"}
+    result = {"id": task_id, "status": "created"}
+    if req.enc_enabled and task:
+        # 创建时就生成该任务的密钥并交出去，对应 Synology「首次链接到公有云
+        # 时自动导出 private.pem」。用户丢了密码时，这个文件是唯一出路，
+        # 所以必须在这一步就给他，不能等到第一次上传才生成。
+        try:
+            keyfile = await _export_task_key(task_id)
+            if keyfile:
+                result["private_key"] = keyfile
+        except crypto.CryptoError as exc:
+            result["key_error"] = f"没能导出任务私钥：{exc}（加密任务仍可运行，请稍后到任务里手动导出）"
+
+    return result
 
 
 @router.put("/{task_id}")
@@ -190,7 +215,16 @@ async def update_task(task_id: int, req: UpdateTaskRequest):
         if updated_task:
             await scheduler.schedule_task(updated_task)
 
-    return {"status": "updated"}
+    result = {"status": "updated"}
+    if updates.get("enc_enabled") == 1:
+        try:
+            keyfile = await _export_task_key(task_id)
+            if keyfile:
+                result["private_key"] = keyfile
+        except crypto.CryptoError as exc:
+            result["key_error"] = f"没能导出任务私钥：{exc}"
+
+    return result
 
 
 @router.delete("/{task_id}")
@@ -198,6 +232,30 @@ async def delete_task(task_id: int):
     await scheduler.unschedule_task(task_id)
     await db.db_delete_task(task_id)
     return {"deleted": True}
+
+
+@router.post("/{task_id}/key")
+async def export_task_key(task_id: int, req: TaskKeyRequest):
+    """重新导出这个任务的私钥文件（丢了旧文件、或者创建时没存下来）。
+
+    要重输密码：这个文件等于该任务全部云端文件的解密权。
+    """
+    task = await db.db_get_task(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if not int(task.get("enc_enabled") or 0):
+        raise HTTPException(400, "这个任务没有开启加密")
+    if not await crypto.keyring.initialized():
+        raise HTTPException(400, "还没有设置加密密码")
+    if not await crypto.keyring.verify_password(req.password):
+        raise HTTPException(400, "密码不正确")
+    try:
+        payload = await _export_task_key(task_id)
+    except crypto.CryptoError as exc:
+        raise HTTPException(400, str(exc))
+    if not payload:
+        raise HTTPException(400, "无法导出这个任务的私钥")
+    return payload
 
 
 @router.post("/{task_id}/sync")

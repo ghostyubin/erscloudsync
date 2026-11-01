@@ -298,6 +298,19 @@
                                 <input type="password" id="setting-crypto-export-password" class="input"
                                        placeholder="密码确认后下载 keys.json，用于离线解密" autocomplete="current-password">
                             </div>
+                            <div class="notify-item notify-item-wide" id="setting-crypto-block-row" style="display:none;">
+                                <label class="notify-check" style="font-weight:500;">
+                                    <input type="checkbox" id="setting-crypto-block"
+                                           onchange="app.saveCryptoBlockOption(this.checked)">
+                                    文件头里附带密钥（只凭密码就能解密）
+                                </label>
+                                <span class="settings-field-desc" style="margin-top:4px;">
+                                    开着才和 Synology 的 Cloud Sync Decryption Tool 一样：忘记私钥文件、
+                                    又找不到数据库时，光有密码也能解密。关掉之后云端连盐和封装的密钥都不给，
+                                    只靠私钥文件 / 密钥包解密——对「只拿到云端密文的人」更强一档。
+                                    只影响之后新加密的文件。
+                                </span>
+                            </div>
                         </div>
 
                         <div class="notify-actions">
@@ -741,6 +754,11 @@
                 </p>
                 <p class="settings-field-desc" id="task-enc-warn" style="display:none;color:var(--color-danger);margin-top:4px;">
                     还没有设置加密密码，请先到「全局设置 → 客户端加密」设置。
+                </p>
+                <p class="settings-field-desc" style="margin-top:6px;">
+                    每个加密任务的私钥会在创建时自动下载一次。
+                    <a href="javascript:void(0)" id="task-enc-key-link" style="display:none;"
+                       onclick="app.exportTaskKey()">重新导出本任务私钥</a>
                 </p>
             </div>
             <div class="form-group" id="task-ignored-group" style="display:none;">

@@ -25,6 +25,7 @@
 
 ### 其他
 - **客户端加密** - 按任务开关，上传前本地加密，网盘上只有密文（文件名路径不变），下载自动解密
+- **离线解密** - 单文件工具，凭**密码**或任务**私钥文件**就能还原，不需要本程序（对标 Synology Cloud Sync Decryption Tool）
 - **日志系统** - 聚合展示所有任务同步日志，支持自动刷新、清除
 - **下载管理** - 从网盘下载文件到本地下载目录
 - **数据持久化** - 数据库、日志、配置全部持久化到 `/config` 目录
@@ -212,7 +213,14 @@ EOF
 **文件名和目录结构保持原样**（`/照片/2024/a.jpg` 仍叫这个名字），只是内容变成乱码，
 所以在网盘客户端里还能认出是哪个文件，但打不开、也扫不出内容。
 
-首次使用要在「全局设置 → 客户端加密」设置一次密码（至少 8 位），之后：
+首次使用要在「全局设置 → 客户端加密」设置一次密码（至少 8 位）。
+
+**开启加密的任务在创建时会自动下载一份「私钥文件」**（`baudusync-task-N-key.json`），
+相当于 Synology Cloud Sync 那套里的 `private.pem`：有了它，不需要密码、不需要数据库，
+也能解开这个任务上传过的所有云端文件。丢了密码时它是唯一的出路，请离线保存。
+创建时没存下来，可以打开任务编辑页点「重新导出本任务私钥」（要输一次密码）。
+
+之后：
 
 - **只影响之后新传的文件**。云端已有的明文文件不会重传，也不会被改写；
 - **下载时自动判断**。文件名没变，所以靠文件头（魔数 `BSENC` + 版本号 + 分块大小
@@ -236,8 +244,8 @@ KEK 会用 `/config/enc.key`（权限 0600）里的密钥再封一份存进数�
 
 ```
 0   5B  "BSENC"      魔数
-5   1B  version = 1
-6   1B  flags        bit0 = 文件名也已加密（当前恒为 0）
+5   1B  version = 2
+6   1B  flags        bit1 = 头后面跟着「钥匙牌」
 7   1B  key_id
 8   4B  chunk_size   默认 4 MiB，与百度分片对齐
 12  8B  nonce_prefix 每文件随机
@@ -245,10 +253,25 @@ KEK 会用 `/config/enc.key`（权限 0600）里的密钥再封一份存进数�
 28 20B  保留
 ```
 
+`flags & 2` 时，48 字节头后面紧跟一段 84 字节的「钥匙牌」：
+
+```
+48  2B  块长度（含后面的 4+16+2+wrapped）
+50  4B  任务号
+54 16B  salt（scrypt 用）
+70  2B  包裹后的密钥长度（固定 60）
+72 60B  被 KEK 包裹的任务密钥（12B nonce + 32B DEK + 16B tag）
+```
+
+有这段，**光有密码**就能解密：`密码 + salt → scrypt → KEK → 解开包裹 → 任务密钥`。
+不需要数据库、不需要私钥文件，和 Synology 的 Cloud Sync Decryption Tool 一致。
+不想要这段（云端连可离线验证密码的样本都不给），把「全局设置 → 客户端加密」里的
+「文件头里附带密钥」关掉即可，之后新加密的文件就只能靠私钥文件 / 密钥包解。
+
 每块用 AES-256-GCM，IV = `nonce_prefix + 块序号(4 字节大端)`，块尾附 16 字节认证标签，
-头部作为 AAD 一起认证。所有块都校验通过才会生成目标文件，中途任何一块被改过都会整体失败；
-解密完还会拒绝「头里写的长度之外」的多余字节，所以截断、追加、块重排都能查出来。
-空文件也带一个 0 长度明文的标签（密文 64 字节），否则它的头没人保护。
+**头和钥匙牌一起作为 AAD 认证**。所有块都校验通过才会生成目标文件，中途任何一块被改过
+都会整体失败；解密完还会拒绝「头里写的长度之外」的多余字节，所以截断、追加、块重排
+都能查出来。空文件也带一个 0 长度明文的标签（密文 148 字节），否则它的头没人保护。
 
 代价说明：加密同步每个文件多一遍磁盘读写（先加密成 `*.bsenc.part`，再上传），
 这是百度要求「每 4MB 分片的 md5」、115 要求「整文件 SHA1」导致的——两者的哈希都只能
@@ -259,47 +282,52 @@ KEK 会用 `/config/enc.key`（权限 0600）里的密钥再封一份存进数�
 ### 离线解密（不用跑 BauduSync 也能还原）
 
 云端存的只是密文，但这个格式**不依赖本程序**。仓库里的 `tools/bsenc-decrypt.py`
-是个单文件脚本，只需要 Python 3.9+ 和 `cryptography`，拷到任何机器都能用：
+是个单文件脚本，只需要 Python 3.9+ 和 `cryptography`，拷到任何机器都能用。
+它和 Synology 的 Cloud Sync Decryption Tool 一样，**密码和私钥文件都能单独解密**：
 
 ```bash
 pip install cryptography        # 或 apt install python3-cryptography
 
-# 先看看密钥在不在、密码对不对（不写任何文件）
-python3 tools/bsenc-decrypt.py info --db /path/to/baudusync.db
+# ① 只凭密码：不需要数据库、不需要私钥文件
+python3 tools/bsenc-decrypt.py decrypt --password '你的密码' -o ./plain ~/cloud/照片
 
-# 把整个目录解密到 ./plain，保留原子目录结构
-python3 tools/bsenc-decrypt.py decrypt --db /path/to/baudusync.db -o ./plain ~/cloud/照片
+# ② 只凭私钥文件：连密码都不用（密码忘了就走这条）
+python3 tools/bsenc-decrypt.py decrypt --key baudusync-task-1-key.json -o ./plain ~/cloud
 
-# 原地解密，用明文覆盖密文（不可撤销，要 -y 或交互确认）
-python3 tools/bsenc-decrypt.py decrypt --db /path/to/baudusync.db --in-place ~/cloud/照片
-
-# 只校验完整性，不产出文件
-python3 tools/bsenc-decrypt.py decrypt --db /path/to/baudusync.db --verify-only ~/cloud
-
-# 只有导出的密钥包
-python3 tools/bsenc-decrypt.py decrypt --keys baudusync-keys-20261101.json -o ./plain ~/cloud
+# 其它常用动作
+python3 tools/bsenc-decrypt.py info --password '你的密码' ~/cloud   # 看概况，不写文件
+python3 tools/bsenc-decrypt.py decrypt --password '…' --verify-only ~/cloud   # 只校验
+python3 tools/bsenc-decrypt.py decrypt --password '…' --in-place ~/cloud/照片   # 原地覆盖
+python3 tools/bsenc-decrypt.py decrypt --password '…' --copy-plain -o ./plain ~/cloud
 ```
 
 容器里也带着这个脚本，可以不给 NAS 装任何东西直接跑：
 
 ```bash
 docker exec baudusync python /app/tools/bsenc-decrypt.py \
-    info --db /config/baudusync.db --password '你的密码'
+    decrypt --password '你的密码' -o /downloads/plain /sync/照片
 ```
 
-**光有密码和密文是解不开的**，这一点必须记住。密码只能推出 KEK，真正加密每个文件
-的是**随机的任务密钥（DEK）**，它只以「被 KEK 包裹」的形式存在数据库里。所以离线解密
-需要三样东西之一：
+三种凭据的取舍：
 
-| 密钥来源 | 命令参数 | 什么时候用 |
-|---|---|---|
-| BauduSync 的数据库 | `--db baudusync.db` | NAS 还在，或整机备份里有 `.db` |
-| 界面导出的密钥包 | `--keys keys.json` | 只留了一份文件备份，或想把解密能力单独保管 |
-| `enc.key` 密钥文件 | 默认取数据库同目录的 `enc.key` | 有库也有 keyfile 时免密码 |
+| 凭据 | 命令参数 | 单独能解吗 | 什么时候用 |
+|---|---|---|---|
+| **密码** | `--password` | ✅ 能 | 文件头里带着钥匙牌（默认开），最省事 |
+| **任务私钥** | `--key task-N-key.json` | ✅ 能 | 密码忘了；或者关掉了钥匙牌 |
+| BauduSync 数据库 | `--db baudusync.db` | 需配合密码或 `enc.key` | NAS 还在，想用**当前**密码解所有文件 |
+| 界面导出的密钥包 | `--keys keys.json` | 需配合密码 | 只有文件备份、想把解密能力单独保管 |
+
+**为什么密码能单独用**：每个加密文件头里都附了一段「钥匙牌」——salt 加上被密码
+派生的 KEK 包裹的任务密钥。工具拿密码现推 KEK，解开这段就得到任务密钥。代价写在
+下面的威胁模型里。
+
+**改过密码要注意**：钥匙牌是**加密那一刻**的密码封的。改密码之后，老文件用老密码、
+新文件用新密码；想用当前密码一次解全部，就用 `--db` 或 `--keys`（库里存的永远是最新
+的包裹密钥），或者干脆用私钥文件（它不随密码变化）。
 
 「全局设置 → 客户端加密 → 导出解密密钥」会下载一个 `baudusync-keys-*.json`
-（**要重新输一次密码确认**）。它和密码一起，就是完整的灾难恢复材料——建议和
-`enc.key`、数据库备份分开放。
+（**要重新输一次密码确认**），相当于把所有任务的解密权打包。建议和私钥文件、`enc.key`、
+数据库备份分开放，别和密码放同一处。
 
 脚本的行为和本体保持一致：靠文件头判断是不是密文，不是就跳过（`--copy-plain`
 可以把明文也一并复制，用于还原整个混合目录）；每块都验 GCM 标签，改过一位就报
@@ -502,7 +530,8 @@ compose 的 `environment` 若写成 `- BAIDU_APP_KEY=`（值为空），变量�
 **能防住**
 
 - 网盘方、任何拿到云盘账号的人看不到文件内容（上传的是 AES-256-GCM 密文）；
-- 云端数据泄漏、共享链接被转发——拿到密文也解不开；
+- 云端数据泄漏、共享链接被转发——拿到密文也解不开（前提是密码没被试出来，
+  见下面「钥匙牌」那条）；
 - 改动、截断、拼接云端文件会被检测出来（每块都有认证标签，头和块序号都参与认证）。
 
 **防不住**
@@ -510,10 +539,16 @@ compose 的 `environment` 若写成 `- BAIDU_APP_KEY=`（值为空），变量�
 - **拿到 NAS 磁盘或 `/config` 备份的人**。为了重启后能无人值守跑，KEK 用
   `/config/enc.key` 封了一份在库里，这个文件和解密程序在同一台机器上。密码本身
   的强度对"能读磁盘的人"没有作用——需要的是磁盘加密（LUKS 之类）。
-- **密码忘了没有找回途径**。没有后门、没有恢复码，忘了就是永久丢失。
-- **导出的密钥包 `baudusync-keys-*.json` 泄漏 + 密码泄漏 = 全部文件**。它是把
-  所有任务的解密权打包带走，所以导出要求重新输一次密码，也请别把它和密码放在
-  同一处、别扔进同一个网盘。
+- **密码忘了没有找回途径**。没有后门、没有恢复码，忘了就基本等于丢失——除非你留着
+  创建任务时导出的私钥文件（那东西不依赖密码）。
+- **文件头里的「钥匙牌」给了云端一份可以离线验证密码猜想的样本**。为了让「只凭密码」
+  能解密，每个加密文件都带着 salt 和被 KEK 包裹的任务密钥；拿到密文的人可以拿它
+  逐条试密码（每条都要跑一遍 scrypt，32MB / 0.1 秒级）。强密码下这不构成实际威胁，
+  但确实比「云端什么都不给」弱一档。介意就把「文件头里附带密钥」关掉，
+  代价是密码不再够用，得靠私钥文件或密钥包。
+- **导出的密钥包 `baudusync-keys-*.json` 和任务私钥文件**泄漏 + 密码泄漏 = 全部文件。
+  它们是把解密权打包带走，所以导出要求重新输一次密码，也请别和密码放在同一处、
+  别扔进同一个网盘。
 - **密码在 HTTP 请求体里明文传输**。BauduSync 只监听 HTTP，在内网/USB 网段之外
   暴露端口时，请在前面挂一层 TLS 反代。
 

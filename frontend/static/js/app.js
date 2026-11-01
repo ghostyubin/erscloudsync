@@ -867,6 +867,8 @@ const App = {
         document.getElementById('task-max-size').value = '0';
         document.getElementById('task-enc-enabled').checked = false;
         document.getElementById('task-enc-warn').style.display = 'none';
+        const keyLinkNew = document.getElementById('task-enc-key-link');
+        if (keyLinkNew) keyLinkNew.style.display = 'none';
         document.getElementById('task-interval').value = '30';
         document.querySelector('input[name="sync-mode"][value="bidirectional"]').checked = true;
         document.querySelector('input[name="schedule-type"][value="scheduled"]').checked = true;
@@ -895,6 +897,8 @@ const App = {
         document.getElementById('task-max-size').value = task.max_file_size || 0;
         document.getElementById('task-enc-enabled').checked = !!task.enc_enabled;
         document.getElementById('task-enc-warn').style.display = 'none';
+        const keyLink = document.getElementById('task-enc-key-link');
+        if (keyLink) keyLink.style.display = task.enc_enabled ? '' : 'none';
         document.getElementById('task-interval').value = (task.schedule_interval || 1800) / 60;
         const syncMode = document.querySelector(`input[name="sync-mode"][value="${task.sync_mode}"]`);
         if (syncMode) syncMode.checked = true;
@@ -939,16 +943,50 @@ const App = {
             enc_enabled: encEnabled,
         };
         try {
+            let r;
             if (this.editingTaskId) {
-                await this.api('PUT', `/api/tasks/${this.editingTaskId}`, payload);
+                r = await this.api('PUT', `/api/tasks/${this.editingTaskId}`, payload);
                 this.toast('任务已更新', 'success');
             } else {
-                await this.api('POST', '/api/tasks', payload);
+                r = await this.api('POST', '/api/tasks', payload);
                 this.toast('任务已创建', 'success');
+            }
+            // 开加密的任务会顺带把「私钥文件」给出来（相当于 Synology 创建任务
+            // 时导出的 private.pem）。密码忘了就只剩它了，所以必须让用户存下来。
+            if (r && r.private_key) {
+                this._saveJson(r.private_key, `baudusync-task-${r.private_key.task_id}-key.json`);
+                this.toast('已导出任务私钥，请离线保存（忘了密码就靠它）', 'success');
+            } else if (r && r.key_error) {
+                this.toast(r.key_error, 'warning');
             }
             this.closeModal('modal-task');
             this.loadTasks();
         } catch (e) { this.toast('保存失败: ' + e.message, 'error'); }
+    },
+
+    async exportTaskKey() {
+        const id = this.editingTaskId;
+        if (!id) return;
+        const pw = window.prompt('重新导出这个任务的私钥需要确认密码。\n' +
+                                 '（这个文件等于该任务全部云端文件的解密权）');
+        if (!pw) return;
+        try {
+            const r = await this.api('POST', `/api/tasks/${id}/key`, { password: pw });
+            this._saveJson(r, `baudusync-task-${r.task_id}-key.json`);
+            this.toast('私钥已导出，请离线保存', 'success');
+        } catch (e) { this.toast('导出失败: ' + e.message, 'error'); }
+    },
+
+    _saveJson(obj, filename) {
+        const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
     },
 
     async syncNow(id) {
@@ -1375,6 +1413,9 @@ const App = {
         show('setting-crypto-unlock-btn', initialized && !unlocked);
         show('setting-crypto-change-btn', initialized && unlocked);
         show('setting-crypto-export-btn', initialized && unlocked);
+        show('setting-crypto-block-row', initialized);
+        const blk = el('setting-crypto-block');
+        if (blk) blk.checked = st.include_keyblock !== false;
 
         if (badge) {
             let text = '未设置', color = 'var(--text-secondary)';
@@ -1444,6 +1485,19 @@ const App = {
         this._cryptoResult('', true);
     },
 
+    async saveCryptoBlockOption(on) {
+        try {
+            const st = await this.api('POST', '/api/system/crypto/options',
+                                      { include_keyblock: !!on });
+            this._applyCryptoState(st);
+            this._cryptoResult(on ? '之后新加密的文件可以只凭密码解密'
+                                  : '之后新加密的文件只能用私钥 / 密钥包解密', true);
+        } catch (e) {
+            this._cryptoResult(e.message, false);
+            this._applyCryptoState(await this.api('GET', '/api/system/crypto'));
+        }
+    },
+
     toggleCryptoExport() {
         const row = document.getElementById('setting-crypto-export-row');
         const btn = document.getElementById('setting-crypto-export-confirm');
@@ -1467,16 +1521,8 @@ const App = {
         try {
             const r = await this.api('POST', '/api/system/crypto/export', { password: pw });
             if (input) input.value = '';
-            const blob = new Blob([JSON.stringify(r, null, 2)], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
             const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-            a.href = url;
-            a.download = `baudusync-keys-${stamp}.json`;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            setTimeout(() => URL.revokeObjectURL(url), 2000);
+            this._saveJson(r, `baudusync-keys-${stamp}.json`);
             this.toggleCryptoExport();
             this._cryptoResult(`已导出（${r.keys.length} 个任务的密钥），请连密码一起保管`, true);
         } catch (e) {

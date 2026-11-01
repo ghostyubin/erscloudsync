@@ -753,7 +753,10 @@ class SyncEngine:
         if stored:
             return remote_size == stored
         plain = int(rec.get("file_size") or 0)
-        return remote_size in (plain, crypto.encrypted_size(plain))
+        # 密文可能带头里的钥匙牌，也可能没有（设置关掉了）
+        return remote_size in (plain,
+                               crypto.encrypted_size(plain, True),
+                               crypto.encrypted_size(plain, False))
 
     @classmethod
     async def _execute_op(cls, op: SyncOperation, provider: CloudProvider,
