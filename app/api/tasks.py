@@ -94,6 +94,8 @@ class CreateTaskRequest(BaseModel):
     max_file_size: int = 0
     delete_after_sync: int = 0
     enc_enabled: bool = False
+    # bsenc = 自研 AES-256-GCM（默认）；syno = 群晖 Cloud Sync 兼容格式
+    enc_format: str = "bsenc"
 
 
 class UpdateTaskRequest(BaseModel):
@@ -108,11 +110,28 @@ class UpdateTaskRequest(BaseModel):
     max_file_size: Optional[int] = None
     delete_after_sync: Optional[int] = None
     enc_enabled: Optional[bool] = None
+    enc_format: Optional[str] = None
     status: Optional[str] = None
 
 
 class TaskKeyRequest(BaseModel):
     password: str
+
+
+def _enc_format(value) -> str:
+    """归一化加密格式。只有两种，写错就直接告诉用户，别静默回退。"""
+    fmt = (value or "bsenc").strip().lower()
+    if fmt not in ("bsenc", "syno"):
+        raise HTTPException(400, "加密格式只能是 bsenc（推荐）或 syno（群晖兼容）")
+    return fmt
+
+
+async def _require_syno_ready() -> None:
+    """群晖格式要用密码原文派生密钥，库里没有就明确告诉用户怎么办。"""
+    try:
+        await crypto.keyring.syno_password()
+    except crypto.CryptoError as exc:
+        raise HTTPException(400, str(exc))
 
 
 async def _export_task_key(task_id: int) -> Optional[dict]:
@@ -159,6 +178,10 @@ async def create_task(req: CreateTaskRequest):
     if req.enc_enabled and not await crypto.keyring.initialized():
         raise HTTPException(400, "请先在「全局设置 → 客户端加密」里设置密码")
 
+    fmt = _enc_format(req.enc_format)
+    if req.enc_enabled and fmt == "syno":
+        await _require_syno_ready()
+
     task_id = await db.db_create_task(
         name=req.name,
         connection_id=req.connection_id,
@@ -172,6 +195,7 @@ async def create_task(req: CreateTaskRequest):
         max_file_size=req.max_file_size,
         delete_after_sync=req.delete_after_sync,
         enc_enabled=1 if req.enc_enabled else 0,
+        enc_format=fmt,
     )
 
     # Schedule the task
@@ -179,15 +203,20 @@ async def create_task(req: CreateTaskRequest):
     if task:
         await scheduler.schedule_task(task)
 
-    result = {"id": task_id, "status": "created"}
+    result = {"id": task_id, "status": "created", "enc_format": fmt}
     if req.enc_enabled and task:
         # 创建时就生成该任务的密钥并交出去，对应 Synology「首次链接到公有云
         # 时自动导出 private.pem」。用户丢了密码时，这个文件是唯一出路，
         # 所以必须在这一步就给他，不能等到第一次上传才生成。
         try:
-            keyfile = await _export_task_key(task_id)
-            if keyfile:
-                result["private_key"] = keyfile
+            if fmt == "syno":
+                keys = await crypto.keyring.setup_syno_keys(task)
+                result["syno_private_pem"] = keys["private_pem"].decode("ascii")
+                result["syno_public_pem"] = keys["public_pem"].decode("ascii")
+            else:
+                keyfile = await _export_task_key(task_id)
+                if keyfile:
+                    result["private_key"] = keyfile
         except crypto.CryptoError as exc:
             result["key_error"] = f"没能导出任务私钥：{exc}（加密任务仍可运行，请稍后到任务里手动导出）"
 
@@ -206,6 +235,14 @@ async def update_task(task_id: int, req: UpdateTaskRequest):
         if enabled and not await crypto.keyring.initialized():
             raise HTTPException(400, "请先在「全局设置 → 客户端加密」里设置密码")
         updates["enc_enabled"] = 1 if enabled else 0
+    if "enc_format" in updates:
+        updates["enc_format"] = _enc_format(updates["enc_format"])
+
+    will_encrypt = int(updates.get("enc_enabled", task.get("enc_enabled") or 0) or 0)
+    fmt = updates.get("enc_format") or _enc_format(task.get("enc_format"))
+    if will_encrypt and fmt == "syno":
+        await _require_syno_ready()
+
     if updates:
         await db.db_update_task(task_id, **updates)
 
@@ -216,7 +253,18 @@ async def update_task(task_id: int, req: UpdateTaskRequest):
             await scheduler.schedule_task(updated_task)
 
     result = {"status": "updated"}
-    if updates.get("enc_enabled") == 1:
+    fresh = await db.db_get_task(task_id)
+    if fresh and int(fresh.get("enc_enabled") or 0) and fmt == "syno":
+        # 第一次切到群晖格式（或者老任务还没有密钥对）时才生成，已经有就沿用，
+        # 免得用户换一下别的设置就把旧 private.pem 弄废了。
+        if not (fresh.get("syno_pubkey") or "").strip():
+            try:
+                keys = await crypto.keyring.setup_syno_keys(fresh)
+                result["syno_private_pem"] = keys["private_pem"].decode("ascii")
+                result["syno_public_pem"] = keys["public_pem"].decode("ascii")
+            except crypto.CryptoError as exc:
+                result["key_error"] = f"没能导出任务私钥：{exc}"
+    elif updates.get("enc_enabled") == 1:
         try:
             keyfile = await _export_task_key(task_id)
             if keyfile:
@@ -250,6 +298,15 @@ async def export_task_key(task_id: int, req: TaskKeyRequest):
     if not await crypto.keyring.verify_password(req.password):
         raise HTTPException(400, "密码不正确")
     try:
+        if _enc_format(task.get("enc_format")) == "syno":
+            # 群晖格式要的是 PEM 本身——丢进官方解密工具的「私钥」一栏就能用
+            pem = await crypto.keyring.syno_private_pem(task)
+            return {"format": "syno-taskkey", "task_id": task_id,
+                    "task_name": task.get("name") or "",
+                    "file_name": "private.pem",
+                    "private_pem": pem.decode("ascii"),
+                    "note": "群晖 Cloud Sync Decryption Tool 里选「私钥」，把这段内容"
+                            "存成 private.pem 即可（和密码二选一，都能单独解密）。"}
         payload = await _export_task_key(task_id)
     except crypto.CryptoError as exc:
         raise HTTPException(400, str(exc))

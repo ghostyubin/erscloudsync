@@ -69,6 +69,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     enc_enabled INTEGER DEFAULT 0,
     enc_wrapped TEXT DEFAULT '',
     enc_key_id INTEGER DEFAULT 0,
+    -- 密文格式：bsenc = 自研的 AES-256-GCM（带认证）；syno = 群晖 Cloud Sync
+    -- 兼容格式，可以用群晖官方的解密工具打开。两者按任务切换。
+    enc_format TEXT DEFAULT 'bsenc',
+    -- 群晖格式需要一对 RSA 密钥：公钥明文存（本来就不保密），私钥用 KEK
+    -- 包裹后存（用户随时可以重新导出 private.pem）。
+    syno_pubkey TEXT DEFAULT '',
+    syno_priv_wrapped TEXT DEFAULT '',
     status TEXT DEFAULT 'idle'
         CHECK(status IN ('idle', 'running', 'paused', 'error', 'success')),
     last_sync_at REAL,
@@ -220,6 +227,9 @@ async def init_db():
             "ALTER TABLE tasks ADD COLUMN enc_enabled INTEGER DEFAULT 0",
             "ALTER TABLE tasks ADD COLUMN enc_wrapped TEXT DEFAULT ''",
             "ALTER TABLE tasks ADD COLUMN enc_key_id INTEGER DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN enc_format TEXT DEFAULT 'bsenc'",
+            "ALTER TABLE tasks ADD COLUMN syno_pubkey TEXT DEFAULT ''",
+            "ALTER TABLE tasks ADD COLUMN syno_priv_wrapped TEXT DEFAULT ''",
             "ALTER TABLE sync_state ADD COLUMN remote_size INTEGER DEFAULT 0",
         ):
             try:
@@ -344,6 +354,7 @@ async def db_create_task(**kwargs):
         "schedule_type", "schedule_interval", "filter_include", "filter_exclude",
         "max_file_size", "delete_after_sync",
         "enc_enabled", "enc_wrapped", "enc_key_id",
+        "enc_format", "syno_pubkey", "syno_priv_wrapped",
     }
     cols = []
     vals = []
@@ -1004,7 +1015,9 @@ async def db_set_setting(key: str, value: str):
 
 async def db_rewrap_crypto(salt_key: str, salt_b64: str,
                            verifier_key: str, verifier_b64: str,
-                           wraps: list[tuple[int, str]]):
+                           wraps: list[tuple[int, str]],
+                           extra_settings: Optional[list[tuple[str, str]]] = None,
+                           privs: Optional[list[tuple[int, str]]] = None):
     """换密码时一次性落库：新 salt、新验证块、所有任务重新包裹的密钥。
 
     必须在**同一个事务**里写完。分开写的话，中途崩溃/断电会留下「新 salt
@@ -1012,11 +1025,17 @@ async def db_rewrap_crypto(salt_key: str, salt_b64: str,
     新密码推导出的 KEK 解不开旧的，那部分任务的云端文件就永久打不开了。
 
     两个 settings 的键名由调用方传进来，免得这里再抄一份常量和 crypto.py 漂移。
+
+    ``extra_settings`` 用来带别的也要换的键（群晖格式要存一份用 KEK 包裹的
+    密码明文），``privs`` 是群晖格式任务的 RSA 私钥——它们同样是 KEK 包裹的，
+    换密码时必须一起重包，否则那些任务的新文件就加不了密了。
     """
     async with aiosqlite.connect(str(DB_PATH)) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
-            for key, value in ((salt_key, salt_b64), (verifier_key, verifier_b64)):
+            rows = [(salt_key, salt_b64), (verifier_key, verifier_b64)]
+            rows.extend(extra_settings or [])
+            for key, value in rows:
                 await db.execute(
                     """INSERT INTO settings (key, value, updated_at)
                        VALUES (?, ?, strftime('%s','now'))
@@ -1026,6 +1045,11 @@ async def db_rewrap_crypto(salt_key: str, salt_b64: str,
             for task_id, packed in wraps:
                 await db.execute(
                     """UPDATE tasks SET enc_wrapped = ?, enc_key_id = 1,
+                       updated_at = strftime('%s','now') WHERE id = ?""",
+                    (packed, task_id))
+            for task_id, packed in (privs or []):
+                await db.execute(
+                    """UPDATE tasks SET syno_priv_wrapped = ?,
                        updated_at = strftime('%s','now') WHERE id = ?""",
                     (packed, task_id))
             await db.commit()

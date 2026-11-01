@@ -44,6 +44,7 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from app import database as db
 from app.config import DATA_DIR
+from app.services import syno_crypto
 from app.version import APP_VERSION
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,10 @@ VERIFIER_KEY = "crypto_verifier"
 SEALED_KEY = "crypto_sealed_kek"
 # 文件头里是否附带「钥匙牌」（让只凭密码也能解密）。默认开，和 Synology 一致。
 INCLUDE_BLOCK_KEY = "crypto_include_keyblock"
+# 群晖兼容格式要用「密码原文」派生密钥，而 KEK 是从密码推出来的、推不回去。
+# 所以用户输入密码的那一刻顺手用 KEK 包一份存起来，重启后靠它就能继续加密。
+SYNO_PWD_KEY = "crypto_syno_password"
+SYNO_PWD_AAD = b"bsenc-syno-password"
 VERIFY_PLAIN = b"bsenc-verify-v1"
 KEYFILE = DATA_DIR / "enc.key"
 
@@ -152,13 +157,18 @@ def _parse_key_block(fh) -> Optional[dict]:
 
 
 def is_encrypted(path: str) -> bool:
-    """判断这个文件是不是我们加密的。
+    """判断这个文件是不是「我们」加密的（两种格式都算）。
 
     不能只看魔数——文件名不变意味着云端是明文密文混合的，而一个恰好以
     ``BSENC`` 开头的普通文件（二进制格式碰巧撞上，或者用户自己压了个包）
     会被误判成密文，然后解密失败、下载失败。所以魔数之外还要求版本号和
     分块大小都落在合法区间，长度至少够一个空文件的密文。
+
+    群晖格式的魔数 ``__CLOUDSYNC_ENC__`` 更不容易撞上，但它后面还跟一段
+    MD5，两个都对上才算；否则一个被截断的文件会被当成密文去解。
     """
+    if syno_crypto.is_syno(path):
+        return True
     try:
         if os.path.getsize(path) < HEADER_SIZE + TAG_SIZE:
             return False
@@ -319,6 +329,24 @@ def _unwrap(kek: bytes, packed: str, task_id: int) -> bytes:
         raise DecryptError("这个任务的密钥解不开（可能换过密码但没重包裹）")
 
 
+def _seal_pem(kek: bytes, pem: bytes, task_id: int) -> str:
+    """把群晖格式任务的 RSA 私钥用 KEK 包起来存库（AAD 同样绑任务号）。"""
+    nonce = secrets.token_bytes(12)
+    blob = AESGCM(kek).encrypt(nonce, pem, f"syno-task:{task_id}".encode())
+    return _b64(nonce + blob)
+
+
+def _unseal_pem(kek: bytes, packed: str, task_id: int) -> bytes:
+    blob = _unb64(packed)
+    if len(blob) < 13:
+        raise CryptoError("私钥数据损坏")
+    try:
+        return AESGCM(kek).decrypt(blob[:12], blob[12:],
+                                   f"syno-task:{task_id}".encode())
+    except InvalidTag:
+        raise DecryptError("这个任务的私钥解不开（可能换过密码但没重包裹）")
+
+
 class Keyring:
     """全局密码 + 每任务 DEK 的管理与内存缓存。"""
 
@@ -354,6 +382,8 @@ class Keyring:
             "initialized": True,
             "unlocked": bool(self._kek),
             "keyfile": KEYFILE.exists(),
+            # 群晖兼容格式要用密码原文，老库升级上来可能还没有这一份
+            "syno_ready": await self.has_syno_password(),
             "message": "" if self._kek or not sealed else "需要输入密码解锁",
         }
 
@@ -377,14 +407,45 @@ class Keyring:
         logger.info("已生成密钥文件 %s（备份数据库时记得一起备份）", KEYFILE)
         return data
 
-    async def _seal(self, kek: bytes) -> None:
-        """把 KEK 用密钥文件里的 FK 包一份存库，实现无人值守自动解密。"""
+    async def _seal(self, kek: bytes, password: Optional[str] = None) -> None:
+        """把 KEK 用密钥文件里的 FK 包一份存库，实现无人值守自动解密。
+
+        顺手把**密码原文**也用 KEK 包一份。群晖兼容格式必须拿密码原文去派生
+        密钥（KEK 是单向推出来的，反推不回去），没有这一份，NAS 重启之后
+        就没法加密新文件。这份同样只有解开 KEK 才拿得到，不比已经存着的
+        DEK 更暴露——但密码可能被人在别处重用，威胁模型里单独写了这条。
+        """
+        if password:
+            nonce = secrets.token_bytes(12)
+            blob = AESGCM(kek).encrypt(nonce, password.encode("utf-8"), SYNO_PWD_AAD)
+            await db.db_set_setting(SYNO_PWD_KEY, _b64(nonce + blob))
         fk = self._read_keyfile(create=True)
         if not fk:
             return
         nonce = secrets.token_bytes(12)
         blob = AESGCM(fk).encrypt(nonce, kek, b"bsenc-kek")
         await db.db_set_setting(SEALED_KEY, _b64(nonce + blob))
+
+    async def syno_password(self) -> str:
+        """取回密码原文，群晖兼容格式加密时要用。
+
+        老版本升级上来的库还没有这一份，需要用户在设置里重新输一次密码
+        （解锁动作就会把它补上）。
+        """
+        packed = await db.db_get_setting(SYNO_PWD_KEY, "")
+        if not packed:
+            raise CryptoError(
+                "群晖兼容格式需要密码原文，当前库里没有保存。"
+                "请到「全局设置 → 客户端加密」重新输入一次密码")
+        raw = _unb64(packed)
+        try:
+            return AESGCM(await self.kek()).decrypt(
+                raw[:12], raw[12:], SYNO_PWD_AAD).decode("utf-8")
+        except InvalidTag:
+            raise CryptoError("保存的密码副本解不开，请重新输入一次密码")
+
+    async def has_syno_password(self) -> bool:
+        return bool(await db.db_get_setting(SYNO_PWD_KEY, ""))
 
     # ---- 生命周期 ----
     async def setup(self, password: str) -> dict:
@@ -402,7 +463,7 @@ class Keyring:
         self._kek = kek
         self._deks.clear()
         self._blocks.clear()
-        await self._seal(kek)
+        await self._seal(kek, password)
         return {"ok": True, "message": "加密密码已设置"}
 
     async def unlock(self, password: str) -> dict:
@@ -421,7 +482,7 @@ class Keyring:
         self._kek = kek
         self._deks.clear()
         self._blocks.clear()
-        await self._seal(kek)
+        await self._seal(kek, (password or "").strip())
         return {"ok": True, "message": "已解锁，之后重启会自动运行"}
 
     async def export_bundle(self, password: str) -> dict:
@@ -503,12 +564,29 @@ class Keyring:
         new_salt = secrets.token_bytes(16)
         new_kek = await asyncio.to_thread(_derive, new, new_salt)
         verifier = AESGCM(new_kek).encrypt(b"\x00" * 12, VERIFY_PLAIN, None)
+
+        # 群晖格式的私钥同样是 KEK 包裹的，换密码必须一起重包。解不开就
+        # 放弃整个操作（此时还没写库）。
+        privs: list[tuple[int, str]] = []
+        for task in await db.db_list_tasks():
+            packed = (task.get("syno_priv_wrapped") or "").strip()
+            if not packed:
+                continue
+            pem = _unseal_pem(old_kek, packed, int(task["id"]))
+            privs.append((int(task["id"]), _seal_pem(new_kek, pem, int(task["id"]))))
+
+        syno_pwd = secrets.token_bytes(12)
+        syno_blob = syno_pwd + AESGCM(new_kek).encrypt(
+            syno_pwd, (new or "").strip().encode("utf-8"), SYNO_PWD_AAD)
+
         # salt / 验证块 / 所有 wrapped 必须在同一个事务里落地，否则中途崩溃
         # 会留下「新 salt + 部分旧 wrapped」，那部分任务就永久解不开了。
         await db.db_rewrap_crypto(
             SALT_KEY, _b64(new_salt),
             VERIFIER_KEY, _b64(verifier),
-            [(task_id, _wrap(new_kek, dek, task_id)) for task_id, dek in unwrapped])
+            [(task_id, _wrap(new_kek, dek, task_id)) for task_id, dek in unwrapped],
+            extra_settings=[(SYNO_PWD_KEY, _b64(syno_blob))],
+            privs=privs)
 
         self._kek = new_kek
         self._deks.clear()
@@ -611,6 +689,31 @@ class Keyring:
         self._deks.pop(int(task_id), None)
         self._blocks.pop(int(task_id), None)
 
+    # ---- 群晖兼容格式：每任务一对 RSA 密钥 ----
+    async def setup_syno_keys(self, task: dict) -> dict:
+        """为任务生成 RSA 密钥对并落库，返回可下载的 private.pem 内容。
+
+        对应群晖「首次链接公有云时导出的 key.zip」：公钥用来包裹每个文件的
+        session key（写进文件头，谁都能拿），私钥交给用户保管——丢了密码时
+        靠它解。私钥同样用 KEK 包一份存库，这样界面上可以随时重新导出。
+        """
+        task_id = int(task["id"])
+        pub, priv = await asyncio.to_thread(syno_crypto.generate_keypair)
+        kek = await self.kek()
+        await db.db_update_task(task_id,
+                                syno_pubkey=pub.decode("ascii"),
+                                syno_priv_wrapped=_seal_pem(kek, priv, task_id))
+        return {"public_pem": pub, "private_pem": priv}
+
+    async def syno_private_pem(self, task: dict) -> bytes:
+        """取回任务的私钥（用来重新导出 private.pem）。"""
+        packed = (task.get("syno_priv_wrapped") or "").strip()
+        if not packed:
+            raise CryptoError("这个任务没有群晖格式的私钥（可能创建时还没开加密）")
+        fresh = await db.db_get_task(int(task["id"])) or task
+        packed = (fresh.get("syno_priv_wrapped") or "").strip() or packed
+        return _unseal_pem(await self.kek(), packed, int(task["id"]))
+
     def forget_blocks(self) -> None:
         """设置改了之后让钥匙牌缓存失效（不用重新派生 KEK）。"""
         self._blocks.clear()
@@ -637,9 +740,11 @@ keyring = Keyring()
 # 给同步引擎用的高层接口
 # --------------------------------------------------------------------------
 async def task_key(task: dict) -> Optional[bytes]:
-    """任务开了加密就返回它的 DEK，否则 None。"""
+    """任务开了加密（BSENC 格式）就返回它的 DEK，否则 None。"""
     if not int(task.get("enc_enabled") or 0):
         return None
+    if (task.get("enc_format") or "bsenc") == "syno":
+        return None          # 群晖格式没有 DEK，密钥在文件头里
     return await keyring.dek_for_task(task)
 
 
@@ -648,6 +753,8 @@ async def download_keys(task: Optional[dict] = None) -> list[bytes]:
 
     文件名不变，所以「这个文件是哪个任务加密的」只能靠试。自己的任务排第一，
     其它任务的密钥兜底——两个任务指向同一个云端目录时不会解不开。
+
+    群晖格式的任务不参与：它们没有 DEK，密钥包在每个文件自己的头里。
     """
     keys: list[bytes] = []
     seen: set[bytes] = set()
@@ -657,7 +764,8 @@ async def download_keys(task: Optional[dict] = None) -> list[bytes]:
             seen.add(key)
             keys.append(key)
 
-    if task:
+    if task and int(task.get("enc_enabled") or 0) \
+            and (task.get("enc_format") or "bsenc") != "syno":
         try:
             _add(await keyring.dek_for_task(task))
         except (KeyLocked, CryptoError):
@@ -678,7 +786,16 @@ async def download_keys(task: Optional[dict] = None) -> list[bytes]:
 
 
 async def encrypt_for_upload(task: dict, src: str) -> Optional[str]:
-    """加密到 ``src + .bsenc.part``，返回中转文件路径；没开加密返回 None。"""
+    """加密到 ``src + .bsenc.part``，返回中转文件路径；没开加密返回 None。
+
+    两种格式都落到同一个中转后缀：上层只管「有个临时文件要传、传完删掉」，
+    不需要知道密文长什么样。
+    """
+    if not int(task.get("enc_enabled") or 0):
+        return None
+    if (task.get("enc_format") or "bsenc") == "syno":
+        return await _encrypt_for_upload_syno(task, src)
+
     key = await task_key(task)
     if key is None:
         return None
@@ -691,6 +808,54 @@ async def encrypt_for_upload(task: dict, src: str) -> Optional[str]:
         raise
     logger.info("已加密 %s → %d 字节", os.path.basename(src), size)
     return staged
+
+
+async def _encrypt_for_upload_syno(task: dict, src: str) -> Optional[str]:
+    """群晖兼容格式：密码 + 任务公钥各包裹一次 session key。"""
+    fresh = await db.db_get_task(int(task["id"])) or task
+    pub_pem = (fresh.get("syno_pubkey") or "").strip()
+    if not pub_pem:
+        raise CryptoError("这个任务缺少群晖格式的密钥对，请在任务设置里重新生成")
+    password = await keyring.syno_password()
+    staged = src + SUFFIX_CIPHER
+    try:
+        size = await asyncio.to_thread(
+            syno_crypto.encrypt_file, src, staged, password,
+            pub_pem.encode("ascii"), os.path.basename(src))
+    except Exception:
+        _remove(staged)
+        raise
+    logger.info("已按群晖格式加密 %s → %d 字节", os.path.basename(src), size)
+    return staged
+
+
+async def _syno_private_candidates(task: Optional[dict]) -> list[bytes]:
+    """下载兜底用的 RSA 私钥。密码解不开时（比如改过密码）它们还能救。
+
+    私钥本身就足以解 enc_key2，但取出来要先过 KEK，所以锁定状态下这条
+    路也走不通——那属于预期行为。
+    """
+    pems: list[bytes] = []
+    seen: set[int] = set()
+
+    async def _add(candidate: dict) -> None:
+        task_id = int(candidate["id"])
+        if task_id in seen or not (candidate.get("syno_priv_wrapped") or "").strip():
+            return
+        seen.add(task_id)
+        try:
+            pems.append(await keyring.syno_private_pem(candidate))
+        except CryptoError:
+            return
+
+    if task:
+        await _add(task)
+    try:
+        for other in await db.db_list_tasks():
+            await _add(other)
+    except Exception:  # noqa: BLE001 - 兜底逻辑不该拖垮下载
+        logger.debug("枚举任务私钥失败", exc_info=True)
+    return pems
 
 
 async def settle_download(staged: str, final: str,
@@ -706,6 +871,10 @@ async def settle_download(staged: str, final: str,
     if not await asyncio.to_thread(is_encrypted, staged):
         os.replace(staged, final)
         return False
+
+    if await asyncio.to_thread(syno_crypto.is_syno, staged):
+        return await _settle_syno(staged, final, task)
+
     if keys is None:
         keys = await download_keys(task)
     if not keys:
@@ -726,6 +895,45 @@ async def settle_download(staged: str, final: str,
             continue
     _remove(staged)
     raise last or DecryptError("解密失败")
+
+
+async def _settle_syno(staged: str, final: str,
+                       task: Optional[dict]) -> bool:
+    """群晖格式的下载解密：先试密码，再挨个试任务私钥。"""
+    plain_tmp = final + SUFFIX_PLAIN
+    last: Optional[Exception] = None
+
+    try:
+        password: Optional[str] = await keyring.syno_password()
+    except CryptoError:
+        password = None          # 没有密码副本／锁定，直接走私钥兜底
+
+    if password:
+        try:
+            await asyncio.to_thread(syno_crypto.decrypt_file, staged, plain_tmp,
+                                    password, None)
+            os.replace(plain_tmp, final)
+            _remove(staged)
+            return True
+        except syno_crypto.SynoError as exc:
+            _remove(plain_tmp)
+            last = DecryptError(f"密码解不开这个文件：{exc}")
+
+    for pem in await _syno_private_candidates(task):
+        try:
+            await asyncio.to_thread(syno_crypto.decrypt_file, staged, plain_tmp,
+                                    None, pem)
+            os.replace(plain_tmp, final)
+            _remove(staged)
+            return True
+        except syno_crypto.SynoError as exc:
+            _remove(plain_tmp)
+            last = DecryptError(f"私钥解不开这个文件：{exc}")
+
+    _remove(staged)
+    if last:
+        raise last
+    raise KeyLocked("云端的文件是群晖格式的密文，但既没有密码也没有私钥")
 
 
 def _remove(path: str) -> None:

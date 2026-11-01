@@ -746,12 +746,20 @@
             </div>
             <div class="form-group">
                 <label class="notify-check" style="font-weight:500;">
-                    <input type="checkbox" id="task-enc-enabled"> 加密上传
+                    <input type="checkbox" id="task-enc-enabled" onchange="app.onEncToggle()"> 加密上传
                 </label>
                 <p class="settings-field-desc" style="margin-top:6px;">
                     上传前在本地加密，网盘上只有密文，文件名和路径保持不变。
                     <strong>只影响之后新传的文件</strong>，云端已有的明文文件不会重传，下载时原样取回。
                 </p>
+                <div class="form-group" id="task-enc-format-group" style="display:none;margin-top:10px;">
+                    <label>加密格式</label>
+                    <select id="task-enc-format" class="input" onchange="app.onEncFormatChange()">
+                        <option value="bsenc">标准格式（AES-256-GCM，带完整性校验，推荐）</option>
+                        <option value="syno">群晖兼容格式（可直接用群晖官方工具解密）</option>
+                    </select>
+                    <p class="settings-field-desc" id="task-enc-format-desc" style="margin-top:6px;"></p>
+                </div>
                 <p class="settings-field-desc" id="task-enc-warn" style="display:none;color:var(--color-danger);margin-top:4px;">
                     还没有设置加密密码，请先到「全局设置 → 客户端加密」设置。
                 </p>

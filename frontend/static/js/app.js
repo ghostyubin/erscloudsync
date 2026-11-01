@@ -866,6 +866,9 @@ const App = {
         document.getElementById('task-exclude').value = '';
         document.getElementById('task-max-size').value = '0';
         document.getElementById('task-enc-enabled').checked = false;
+        const fmtSelect = document.getElementById('task-enc-format');
+        if (fmtSelect) fmtSelect.value = 'bsenc';
+        this.onEncToggle();
         document.getElementById('task-enc-warn').style.display = 'none';
         const keyLinkNew = document.getElementById('task-enc-key-link');
         if (keyLinkNew) keyLinkNew.style.display = 'none';
@@ -896,6 +899,9 @@ const App = {
         document.getElementById('task-exclude').value = task.filter_exclude || '';
         document.getElementById('task-max-size').value = task.max_file_size || 0;
         document.getElementById('task-enc-enabled').checked = !!task.enc_enabled;
+        const fmtSel = document.getElementById('task-enc-format');
+        if (fmtSel) fmtSel.value = task.enc_format || 'bsenc';
+        this.onEncToggle();
         document.getElementById('task-enc-warn').style.display = 'none';
         const keyLink = document.getElementById('task-enc-key-link');
         if (keyLink) keyLink.style.display = task.enc_enabled ? '' : 'none';
@@ -916,6 +922,28 @@ const App = {
         this.openModal('modal-task');
     },
 
+    /* 勾了「加密上传」才显示格式选择——不加密时选格式没有意义。 */
+    onEncToggle() {
+        const on = !!(document.getElementById('task-enc-enabled') || {}).checked;
+        const group = document.getElementById('task-enc-format-group');
+        if (group) group.style.display = on ? '' : 'none';
+        if (on) this.onEncFormatChange();
+    },
+
+    onEncFormatChange() {
+        const sel = document.getElementById('task-enc-format');
+        const desc = document.getElementById('task-enc-format-desc');
+        if (!sel || !desc) return;
+        desc.innerHTML = sel.value === 'syno'
+            ? '文件头里带一段用密码封装的密钥，所以<strong>只用密码就能解开</strong>，'
+              + '也就能直接丢进群晖的 Cloud Sync Decryption Tool（选密码或 private.pem 都行）。'
+              + '代价是它的密钥派生（MD5 迭代 1000 次）和加密模式（AES-CBC 无逐块认证）都'
+              + '明显弱于标准格式——<strong>这是为了通用性做的取舍</strong>。'
+            : 'AES-256-GCM 分块加密，每块带认证标签，密码经 scrypt 派生。'
+              + '被改过一位就会报错，但<strong>只能用本项目的工具解密</strong>'
+              + '（docker exec 调 bsenc-decrypt.py，或者界面上导出密钥包）。';
+    },
+
     async saveTask() {
         const name = document.getElementById('task-name').value.trim();
         const connectionId = parseInt(document.getElementById('task-connection').value);
@@ -928,6 +956,7 @@ const App = {
         const exclude = document.getElementById('task-exclude').value.trim();
         const maxSizeMB = parseInt(document.getElementById('task-max-size').value) || 0;
         const encEnabled = !!document.getElementById('task-enc-enabled').checked;
+        const encFormat = (document.getElementById('task-enc-format') || {}).value || 'bsenc';
         if (encEnabled && !this.cryptoReady) {
             document.getElementById('task-enc-warn').style.display = 'block';
             this.toast('请先到「全局设置 → 客户端加密」设置密码', 'warning');
@@ -941,6 +970,7 @@ const App = {
             filter_include: include, filter_exclude: exclude,
             max_file_size: maxSizeMB * 1024 * 1024,
             enc_enabled: encEnabled,
+            enc_format: encFormat,
         };
         try {
             let r;
@@ -953,7 +983,10 @@ const App = {
             }
             // 开加密的任务会顺带把「私钥文件」给出来（相当于 Synology 创建任务
             // 时导出的 private.pem）。密码忘了就只剩它了，所以必须让用户存下来。
-            if (r && r.private_key) {
+            if (r && r.syno_private_pem) {
+                this._saveText(r.syno_private_pem, 'private.pem');
+                this.toast('已导出 private.pem，请离线保存（群晖工具和本工具都能用它解密）', 'success');
+            } else if (r && r.private_key) {
                 this._saveJson(r.private_key, `baudusync-task-${r.private_key.task_id}-key.json`);
                 this.toast('已导出任务私钥，请离线保存（忘了密码就靠它）', 'success');
             } else if (r && r.key_error) {
@@ -972,9 +1005,26 @@ const App = {
         if (!pw) return;
         try {
             const r = await this.api('POST', `/api/tasks/${id}/key`, { password: pw });
-            this._saveJson(r, `baudusync-task-${r.task_id}-key.json`);
+            if (r && r.format === 'syno-taskkey') {
+                // 群晖格式就是一份 PEM，官方解密工具里选「私钥」直接用它
+                this._saveText(r.private_pem, r.file_name || 'private.pem');
+            } else {
+                this._saveJson(r, `baudusync-task-${r.task_id}-key.json`);
+            }
             this.toast('私钥已导出，请离线保存', 'success');
         } catch (e) { this.toast('导出失败: ' + e.message, 'error'); }
+    },
+
+    _saveText(text, filename) {
+        const blob = new Blob([text], { type: 'application/x-pem-file' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
     },
 
     _saveJson(obj, filename) {
