@@ -356,7 +356,7 @@ python3 tools/bsenc-decrypt.py decrypt --key baudusync-task-1-key.json -o ./plai
 python3 tools/bsenc-decrypt.py decrypt --key private.pem            -o ./plain ~/cloud       # 群晖格式
 
 # 其它常用动作
-python3 tools/bsenc-decrypt.py info --password '你的密码' ~/cloud   # 看概况，不写文件
+python3 tools/bsenc-decrypt.py info --password '你的密码' ~/cloud   # 看概况 + 统计里面各格式密文数，不写文件
 python3 tools/bsenc-decrypt.py decrypt --password '…' --verify-only ~/cloud   # 只校验
 python3 tools/bsenc-decrypt.py decrypt --password '…' --in-place ~/cloud/照片   # 原地覆盖
 python3 tools/bsenc-decrypt.py decrypt --password '…' --copy-plain -o ./plain ~/cloud

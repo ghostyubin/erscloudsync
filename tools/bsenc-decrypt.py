@@ -13,7 +13,7 @@
 * ``BSENC``          —— 本项目自研的 AES-256-GCM（每块带认证）
 * ``__CLOUDSYNC_ENC__`` —— 群晖 Cloud Sync 格式，**群晖官方那个桌面工具也能解**
 
-    # 只看密钥概况，不写任何文件
+    # 只看密钥概况，不写任何文件（给上目录还会统计各格式密文的个数）
     python3 bsenc-decrypt.py info --db /config/baudusync.db
 
     # 一个密码，把整个目录解密到 ./plain
@@ -711,7 +711,45 @@ def confirm(question: str) -> bool:
         return False
 
 
+def _scan_targets(args) -> None:
+    """可选：统计目标目录里有几个密文、各是什么格式。"""
+    raw = getattr(args, "targets", None) or []
+    if not raw:
+        return
+    pairs = collect([Path(t).expanduser() for t in raw])
+    if not pairs:
+        print("目标里没有文件。")
+        return
+    n_syno = n_bsenc = n_plain = 0
+    b_syno = b_bsenc = 0
+    for f, _rel in pairs:
+        if is_syno(str(f)):
+            n_syno += 1
+            b_syno += f.stat().st_size
+        elif looks_encrypted(str(f)):
+            n_bsenc += 1
+            b_bsenc += f.stat().st_size
+        else:
+            n_plain += 1
+    print(f"扫描 {len(pairs)} 个文件：")
+    if n_syno:
+        print(f"  群晖格式密文  {n_syno} 个（{human(b_syno)}）")
+    if n_bsenc:
+        print(f"  标准格式密文  {n_bsenc} 个（{human(b_bsenc)}）")
+    if n_plain:
+        print(f"  非密文        {n_plain} 个（解密时默认跳过）")
+    if n_syno and not n_bsenc:
+        print("  提示：这批文件是群晖格式，同样可以直接用 Synology 的"
+              " Cloud Sync Decryption Tool 解。")
+
+
 def cmd_info(args) -> int:
+    rc = _info_report(args)
+    _scan_targets(args)
+    return rc
+
+
+def _info_report(args) -> int:
     cred = _credentials(args)
     print(f"凭据：{cred.describe()}")
     for s in cred.sources:
@@ -973,6 +1011,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     p_info = sub.add_parser("info", help="显示凭据情况，顺便验证密码")
     common(p_info)
+    p_info.add_argument("targets", nargs="*",
+                        help="可选：文件或目录，统计里面有多少密文、各是什么格式")
     p_info.set_defaults(func=cmd_info)
 
     p_dec = sub.add_parser("decrypt", help="解密文件或目录")
