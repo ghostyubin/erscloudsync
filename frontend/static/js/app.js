@@ -1305,6 +1305,8 @@ const App = {
         const quiet = el('setting-notify-quiet');
         const enabled = el('setting-notify-enabled');
         const insecure = el('setting-notify-insecure');
+        const digest = el('setting-notify-digest');
+        const digestHours = el('setting-notify-digest-hours');
         if (device) device.value = n.device || '';
         if (url) url.value = n.url || '';
         if (token) {
@@ -1325,6 +1327,13 @@ const App = {
         }
         if (enabled) enabled.checked = !!n.enabled;
         if (insecure) insecure.checked = !!n.insecure;
+        if (digest) digest.checked = !!n.digest_enabled;
+        if (digestHours) {
+            const lim = (limits && limits.notify_digest_hours) || { min: 1, max: 72 };
+            digestHours.min = lim.min;
+            digestHours.max = lim.max;
+            digestHours.value = n.digest_hours == null ? 6 : n.digest_hours;
+        }
     },
 
     /* silent=true 时不弹成功 toast，供「保存并发送测试」复用。 */
@@ -1358,6 +1367,21 @@ const App = {
         const enabledEl = el('setting-notify-enabled');
         const insecureEl = el('setting-notify-insecure');
         const deviceEl = el('setting-notify-device');
+        const digestEl = el('setting-notify-digest');
+        const digestHoursEl = el('setting-notify-digest-hours');
+
+        // 汇总间隔：按小时取整数，范围由后端给的 limits 决定（1–72）
+        const dMin = parseInt(digestHoursEl && digestHoursEl.min, 10) || 1;
+        const dMax = parseInt(digestHoursEl && digestHoursEl.max, 10) || 72;
+        const dHours = parseInt(digestHoursEl ? digestHoursEl.value : '', 10);
+        if (!Number.isFinite(dHours) || dHours < dMin || dHours > dMax) {
+            if (!silent) {
+                this.toast(`汇总间隔要在 ${dMin}–${dMax} 小时之间`, 'error');
+                if (digestHoursEl) digestHoursEl.focus();
+            }
+            return false;
+        }
+
         const payload = {
             notify: {
                 enabled: !!(enabledEl && enabledEl.checked),
@@ -1365,6 +1389,8 @@ const App = {
                 quiet: quiet,
                 insecure: !!(insecureEl && insecureEl.checked),
                 device: (deviceEl ? deviceEl.value : '').trim(),
+                digest_enabled: !!(digestEl && digestEl.checked),
+                digest_hours: dHours,
             }
         };
         // 空 token = 不修改：界面上是打码值，照原样提交会把真 token 写坏
@@ -1383,8 +1409,10 @@ const App = {
                 if (noToken) {
                     this.toast('已保存，但还没填「分组 Token」——没有 token 通知发不出去', 'error');
                 } else {
+                    const digestOn = !!(digestEl && digestEl.checked);
                     this.toast(payload.notify.enabled
-                        ? `通知已开启，文件夹静默 ${quiet} 秒后会推送`
+                        ? `通知已开启，静默 ${quiet} 秒后推送` +
+                          (digestOn ? `，每 ${dHours} 小时汇总一次` : '')
                         : '通知已关闭', 'success');
                 }
                 if (btn) {
@@ -1424,6 +1452,43 @@ const App = {
         } catch (e) {
             if (out) { out.textContent = '发送失败：' + e.message; out.className = 'notify-result err'; }
             this.toast('测试发送失败: ' + e.message, 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    },
+
+    /* 预览汇总：按「最近 N 小时」真实统计并推送一条，不动下次推送的时间点。
+       这段时间没传东西时后端会跳过（不往手机上发空消息），这里如实说明。 */
+    async testDigest() {
+        const btn = document.getElementById('setting-notify-digest-test');
+        const out = document.getElementById('setting-notify-result');
+        if (btn) btn.disabled = true;
+        if (out) { out.textContent = '正在统计最近一段时间的传输…'; out.className = 'notify-result'; }
+        try {
+            if (!await this.saveNotifySettings(true)) {
+                if (out) { out.textContent = '请先补全网关地址和分组 Token'; out.className = 'notify-result err'; }
+                return;
+            }
+            const res = await this.api('POST', '/api/system/notify/digest');
+            if (out) {
+                if (res && res.skipped) {
+                    out.textContent = '这段时间没有传输，正式运行时也不会发这条';
+                    out.className = 'notify-result';
+                } else if (res && res.ok) {
+                    // 排版用「/」串起来，免得在窄屏里堆成一片
+                    out.textContent = '已发送：' + String(res.body || '').replace(/\n/g, ' / ');
+                    out.className = 'notify-result ok';
+                } else {
+                    out.textContent = '发送失败：' + ((res && res.message) || '未知错误');
+                    out.className = 'notify-result err';
+                }
+            }
+            if (res && res.ok && !res.skipped) {
+                this.toast('汇总已发出，去手机上看看排版', 'success');
+            }
+        } catch (e) {
+            if (out) { out.textContent = '发送失败：' + e.message; out.className = 'notify-result err'; }
+            this.toast('汇总发送失败: ' + e.message, 'error');
         } finally {
             if (btn) btn.disabled = false;
         }

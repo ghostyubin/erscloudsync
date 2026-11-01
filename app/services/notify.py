@@ -50,6 +50,18 @@ INSECURE_KEY = "notify_insecure"
 # 设备名称：多台机器都往同一个网关推的时候，靠这一行区分是谁发的
 DEVICE_KEY = "device_name"
 
+# 定时汇总：每隔 N 小时推一条「这段时间传了多少」，和「每个文件夹传完推一条」
+# 是两条独立的线 —— 前者是「小记录」，用于人不在电脑前也能知道一天传了什么。
+DIGEST_ENABLED_KEY = "digest_enabled"
+DIGEST_HOURS_KEY = "digest_hours"
+# 上次汇总的时间戳（水位线）。存库而不是放内存：重建容器后既不会重复推
+# 一条重复的，也不会把停机那段算成「0 个文件」。
+DIGEST_LAST_KEY = "digest_last_at"
+
+DIGEST_DEFAULT_HOURS = 6
+DIGEST_HOURS_MIN = 1
+DIGEST_HOURS_MAX = 72
+
 # 没填设备名时的兜底（以前的通知里没有设备名，旧配置升级上来不会空一行）
 DEVICE_FALLBACK = "BauduSync"
 
@@ -96,6 +108,18 @@ def fmt_duration(seconds: float) -> str:
     return f"{hours}小时{minutes}分"
 
 
+def fmt_span_label(seconds: float) -> str:
+    """汇总头的时长。整点就说「6 小时」—— ``fmt_duration`` 会给出「6小时0分」，
+    放在第一行标题里很别扭；不整齐时才落回「6 小时12 分」。"""
+    total = int(max(0, seconds))
+    if total < 3600:
+        return f"{max(1, round(total / 60))} 分钟"
+    hours = total / 3600
+    if abs(hours - round(hours)) < 0.05:
+        return f"{int(round(hours))} 小时"
+    return f"{total // 3600} 小时{total % 3600 // 60} 分"
+
+
 # 消息里最多点几个文件名，再多就只给数量
 NAME_LIMIT = 3
 # 一个桶里最多记多少个不同子目录（只用于数「N 个文件夹」，防止长任务吃内存）
@@ -139,6 +163,10 @@ class NotifyConfig:
     quiet: int = NOTIFY_DEFAULT_QUIET
     insecure: bool = False
     device: str = DEVICE_FALLBACK
+    # 定时汇总（每隔 N 小时的小结）
+    digest_enabled: bool = False
+    digest_hours: int = DIGEST_DEFAULT_HOURS
+    digest_last_at: float = 0.0
 
     @property
     def configured(self) -> bool:
@@ -199,9 +227,19 @@ def _clamp_quiet(raw, default: int) -> int:
     return max(QUIET_MIN, min(QUIET_MAX, value))
 
 
+def clamp_digest_hours(raw, default: int = DIGEST_DEFAULT_HOURS) -> int:
+    """汇总间隔：按小时，单整数。非法值回落到默认，不抛错（老配置也能跑）。"""
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return max(DIGEST_HOURS_MIN, min(DIGEST_HOURS_MAX, value))
+
+
 async def load_config() -> NotifyConfig:
     """从 settings 表读通知配置，库里没有值就用环境变量/内置默认。"""
-    keys = (ENABLED_KEY, URL_KEY, TOKEN_KEY, QUIET_KEY, INSECURE_KEY, DEVICE_KEY)
+    keys = (ENABLED_KEY, URL_KEY, TOKEN_KEY, QUIET_KEY, INSECURE_KEY, DEVICE_KEY,
+            DIGEST_ENABLED_KEY, DIGEST_HOURS_KEY, DIGEST_LAST_KEY)
     raw = {}
     for key in keys:
         try:
@@ -211,11 +249,17 @@ async def load_config() -> NotifyConfig:
 
     url = raw.get(URL_KEY) or NOTIFY_DEFAULT_URL
     token = raw.get(TOKEN_KEY) or NOTIFY_DEFAULT_KEY
-    # 显式存过 "0" 才算关闭；没存过时，只要地址和 token 都有就默认开启
-    if raw.get(ENABLED_KEY) is None:
+    # 显式存过 "0" 才算关闭；没存过时，只要地址和 token 都有就默认开启。
+    # 注意 db_get_setting 对没有的行返回的是空串而不是 None，两种都算「没存过」。
+    if (raw.get(ENABLED_KEY) or "") == "":
         enabled = bool(url and token)
     else:
         enabled = _as_bool(raw.get(ENABLED_KEY))
+
+    try:
+        digest_last = float(str(raw.get(DIGEST_LAST_KEY) or 0))
+    except (TypeError, ValueError):
+        digest_last = 0.0
 
     return NotifyConfig(
         enabled=enabled,
@@ -224,6 +268,10 @@ async def load_config() -> NotifyConfig:
         quiet=_clamp_quiet(raw.get(QUIET_KEY), NOTIFY_DEFAULT_QUIET),
         insecure=_as_bool(raw.get(INSECURE_KEY)),
         device=(raw.get(DEVICE_KEY) or "").strip() or DEVICE_FALLBACK,
+        # 定时汇总默认关闭：没勾选就一条都不会发
+        digest_enabled=_as_bool(raw.get(DIGEST_ENABLED_KEY)),
+        digest_hours=clamp_digest_hours(raw.get(DIGEST_HOURS_KEY)),
+        digest_last_at=max(0.0, digest_last),
     )
 
 
@@ -336,6 +384,75 @@ class FolderBatch:
         手机上的第一行；状态行放进正文第一行。
         """
         return f"同步设备：{(self.device or '').strip() or DEVICE_FALLBACK}"
+
+
+# --------------------------------------------------------------------------
+# 定时汇总（每隔 N 小时的一条小记录）
+# --------------------------------------------------------------------------
+
+def _fmt_span(since: float, until: float) -> str:
+    """时间段。同一天只写一次日期，跨天才两边都写，省字数。"""
+    start = datetime.fromtimestamp(since)
+    end = datetime.fromtimestamp(until)
+    if start.date() == end.date():
+        return f"{start:%Y-%m-%d %H:%M} → {end:%H:%M}"
+    return f"{start:%m-%d %H:%M} → {end:%m-%d %H:%M}"
+
+
+def build_digest_body(stats: dict, since: float, until: float) -> str:
+    """把一段时间的统计拼成纯文本小记录，排版规则与单次通知一致。
+
+    例::
+
+        📊 近 6 小时
+        共 62 个文件 · 2 个文件夹
+        大小 12.4 GB
+        目录 /sync/1 40 个 · /sync/2 22 个
+        失败 1 个：bad.mp4
+        2026-11-01 03:00 → 09:00
+    """
+    files = int(stats.get("files") or 0)
+    folder_count = int(stats.get("folder_count") or 0)
+    failed = int(stats.get("failed") or 0)
+
+    lines: list[str] = [f"📊 近 {fmt_span_label(until - since)}"]
+
+    if files:
+        lines.append(f"共 {files} 个文件 · {folder_count} 个文件夹")
+    elif failed:
+        # 一个都没传成时，「共 0 个文件」还不如直接说失败
+        lines.append(f"⚠️ {failed} 个文件失败")
+
+    if stats.get("bytes"):
+        lines.append(f"大小 {fmt_bytes(int(stats['bytes']))}")
+
+    # 纯上传是默认行为，不用啰嗦；有下载/删除才拆开说
+    actions = []
+    if stats.get("uploads"):
+        actions.append(f"上传 {stats['uploads']} 个")
+    if stats.get("downloads"):
+        actions.append(f"下载 {stats['downloads']} 个")
+    if stats.get("deletes"):
+        actions.append(f"删除 {stats['deletes']} 个")
+    if len(actions) > 1 or stats.get("downloads") or stats.get("deletes"):
+        lines.append(" · ".join(actions))
+
+    folders = stats.get("folders") or []
+    if folders:
+        shown = [f"{label} {n} 个" for label, n in list(folders)[:3]]
+        if folder_count > len(shown):
+            shown.append(f"等 {folder_count} 个")
+        lines.append("目录 " + " · ".join(shown))
+
+    if failed and files:
+        names = stats.get("failed_names") or []
+        line = f"失败 {failed} 个"
+        if names:
+            line += "：" + "、".join(names[:3])
+        lines.append(line)
+
+    lines.append(_fmt_span(since, until))
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------
@@ -506,6 +623,8 @@ class Notifier:
             try:
                 await asyncio.sleep(TICK)
                 await self.flush_due()
+                # 汇总和「文件夹传完」两条线互不影响：前者按小时，后者按静默
+                await self.maybe_digest()
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - 循环不能死
@@ -555,19 +674,17 @@ class Notifier:
 
     # -- 发送 -------------------------------------------------------------
 
-    async def _send(self, cfg: NotifyConfig, batch: FolderBatch
-                    ) -> tuple[bool, str]:
+    async def _post(self, cfg: NotifyConfig, title: str, body: str
+                    ) -> tuple[bool, str, int, str]:
+        """发一条纯文本到网关，返回 (成功?, 失败原因或日志, HTTP 状态码, 原文)。
+
+        判成功只看网关响应体里的 ``code``：Heimdallr 推送失败也回 HTTP 200。
+        """
         endpoint = cfg.endpoint
         if not endpoint:
-            return False, "通知地址为空"
-        # 桶是同步方法里建的，拿不到异步配置，发送前补上设备名
-        batch.device = cfg.device
-        payload = {
-            "key": cfg.token,
-            "title": batch.title(),
-            "body": batch.body(),
-            "msg_type": "text",
-        }
+            return False, "通知地址为空", 0, ""
+        payload = {"key": cfg.token, "title": title, "body": body,
+                   "msg_type": "text"}
         timeout = aiohttp.ClientTimeout(total=15)
         # aiohttp: ssl=False 表示跳过证书校验，None 表示用默认校验
         ssl_arg = False if cfg.insecure else None
@@ -577,16 +694,23 @@ class Notifier:
                     text = (await resp.text())[:300]
                     failure = _gateway_failure(resp.status, text)
                     if failure:
-                        return False, failure
-                    return True, f"HTTP {resp.status}: {text}"
+                        return False, failure, resp.status, text
+                    return True, f"HTTP {resp.status}: {text}", resp.status, text
         except asyncio.TimeoutError:
-            return False, "请求网关超时（15 秒）"
+            return False, "请求网关超时（15 秒）", 0, ""
         except aiohttp.ClientConnectorCertificateError as exc:
-            return False, (f"证书校验失败，可在设置里勾选「跳过证书校验」：{exc}")
+            return False, f"证书校验失败，可在设置里勾选「跳过证书校验」：{exc}", 0, ""
         except aiohttp.ClientError as exc:
-            return False, f"连接网关失败：{exc}"
+            return False, f"连接网关失败：{exc}", 0, ""
         except Exception as exc:  # noqa: BLE001
-            return False, f"发送异常：{exc}"
+            return False, f"发送异常：{exc}", 0, ""
+
+    async def _send(self, cfg: NotifyConfig, batch: FolderBatch
+                    ) -> tuple[bool, str]:
+        # 桶是同步方法里建的，拿不到异步配置，发送前补上设备名
+        batch.device = cfg.device
+        ok, detail, _, _ = await self._post(cfg, batch.title(), batch.body())
+        return ok, detail
 
     async def send_test(self, title: str = "",
                         body: str = "✅ 测试通知\n如果你在手机上看到这条消息，说明通知已经能正常送达。",
@@ -605,27 +729,84 @@ class Notifier:
             return {"ok": False, "message": "请先填写" + "、".join(missing)}
         if not title:
             title = f"同步设备：{cfg.device}"
-        endpoint = cfg.endpoint
-        payload = {"key": cfg.token, "title": title, "body": body,
-                   "msg_type": "text"}
-        timeout = aiohttp.ClientTimeout(total=15)
-        ssl_arg = False if cfg.insecure else None
+        ok, detail, status, text = await self._post(cfg, title, body)
+        return {"ok": ok, "endpoint": cfg.endpoint, "status": status,
+                "message": text if ok else detail}
+
+    # -- 定时汇总 ---------------------------------------------------------
+
+    async def _save_digest_mark(self, cfg: NotifyConfig, when: float) -> None:
+        """把水位线写库，并同步改内存里的配置，避免缓存期内重复触发。"""
+        cfg.digest_last_at = when
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(endpoint, json=payload, ssl=ssl_arg) as resp:
-                    text = (await resp.text())[:300]
-                    failure = _gateway_failure(resp.status, text)
-                    return {"ok": not failure, "endpoint": endpoint,
-                            "status": resp.status,
-                            "message": failure or text}
-        except asyncio.TimeoutError:
-            return {"ok": False, "endpoint": endpoint,
-                    "message": "请求网关超时（15 秒）"}
-        except aiohttp.ClientConnectorCertificateError as exc:
-            return {"ok": False, "endpoint": endpoint,
-                    "message": f"证书校验失败，勾选「跳过证书校验」再试：{exc}"}
-        except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "endpoint": endpoint, "message": f"{exc}"}
+            await db.db_set_setting(DIGEST_LAST_KEY, str(int(when)))
+        except Exception:  # noqa: BLE001 - 写不进去最多下次重复推一条
+            logger.warning("保存汇总水位线失败", exc_info=True)
+
+    async def maybe_digest(self) -> None:
+        """每个 tick 检查一次：到点了就推一条这段时间的传输小结。"""
+        cfg = await self.config()
+        if not (cfg.enabled and cfg.configured and cfg.digest_enabled):
+            return
+        now = time.time()
+        interval = cfg.digest_hours * 3600
+        last = cfg.digest_last_at
+        if last <= 0:
+            # 刚开启：从此刻开始计时，别一勾选就推一条（那会是空的小结，
+            # 而且时间跨度也不对）
+            await self._save_digest_mark(cfg, now)
+            return
+        if now - last < interval:
+            return
+        since = last
+        if now - since > interval * 4:
+            # 停机太久（换机、断电、升级镜像）：只统计最近一个周期，
+            # 否则会推一条「近 300 小时」
+            since = now - interval
+        await self.send_digest(since=since, until=now, cfg=cfg)
+
+    async def send_digest(self, *, since: Optional[float] = None,
+                          until: Optional[float] = None,
+                          cfg: Optional[NotifyConfig] = None,
+                          advance: bool = True) -> dict:
+        """推一条汇总。``advance=False`` 用于界面上的「预览」，不动水位线。"""
+        cfg = cfg or await self.config()
+        if not cfg.configured:
+            missing = [name for name, value in
+                       (("网关地址", cfg.url), ("分组 Token", cfg.token)) if not value]
+            return {"ok": False, "message": "请先填写" + "、".join(missing)}
+
+        until = until or time.time()
+        since = since or (until - cfg.digest_hours * 3600)
+        stats = await db.db_digest_stats(since, until)
+
+        # 这段时间什么都没传也没失败：不发。天天准点推「0 个文件」只会让人
+        # 把通知静音掉，那是比不发更糟的结果。
+        if not (stats["files"] or stats["failed"]):
+            if advance:
+                await self._save_digest_mark(cfg, until)
+            return {"ok": True, "skipped": True, "stats": stats,
+                    "message": "这段时间没有传输，未发送"}
+
+        body = build_digest_body(stats, since, until)
+        ok, detail, status, _ = await self._post(
+            cfg, f"同步设备：{cfg.device}", body)
+        if advance:
+            await self._save_digest_mark(cfg, until)
+        self.last_result = {
+            "ok": ok, "at": until, "folder": f"汇总 {cfg.digest_hours} 小时",
+            "message": detail,
+        }
+        if not ok:
+            logger.warning("汇总通知发送失败：%s", detail)
+        return {"ok": ok, "status": status, "stats": stats,
+                "message": detail, "body": body}
+
+    def next_digest_at(self, cfg: NotifyConfig) -> float:
+        """界面用：下一次汇总的时间戳（0 表示还没开始计时）。"""
+        if not cfg.digest_enabled or cfg.digest_last_at <= 0:
+            return 0.0
+        return cfg.digest_last_at + cfg.digest_hours * 3600
 
     def snapshot(self) -> dict:
         """给界面/排查用：当前排队的桶。"""
@@ -639,6 +820,11 @@ class Notifier:
                 for b in self._pending.values()
             ],
             "last_result": self.last_result,
+            "digest": {
+                "enabled": bool(self._cfg and self._cfg.digest_enabled),
+                "hours": self._cfg.digest_hours if self._cfg else 0,
+                "last_at": self._cfg.digest_last_at if self._cfg else 0,
+            },
         }
 
 

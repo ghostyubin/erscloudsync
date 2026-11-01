@@ -639,6 +639,100 @@ async def db_count_records(*, action: Optional[str] = None,
         return int(row[0]) if row else 0
 
 
+def _digest_folder(root: str, action: str, source: str, target: str) -> str:
+    """把一条记录归到「任务本地根下的一级目录」，口径和实时通知的分桶一致。
+
+    上传和「删远端」时 ``source`` 是本地路径；下载和「删本地」时 ``target``
+    才是本地路径（见 `sync_engine._add_record` 的调用）。相对任务的
+    ``local_path`` 取第一段：``/sync/1/a.jpg`` → ``/sync/1``，直接放在
+    根下的 → ``/sync``。任务已被删除（拿不到根）时退化成按路径第一段
+    归并，不会算丢。
+    """
+    local_side = source if action in ("upload", "delete_remote") else target
+    path = (local_side or "").replace("\\", "/")
+    root = (root or "").replace("\\", "/").rstrip("/")
+    if root and path.startswith(root + "/"):
+        rel = path[len(root) + 1:]
+    elif root and path.startswith(root):
+        rel = path[len(root):].lstrip("/")
+    else:
+        rel = path.lstrip("/")
+    head, sep, _ = rel.partition("/")
+    if root:
+        return f"{root}/{head}" if sep else root
+    return head or "/"
+
+
+async def db_digest_stats(since: float, until: float) -> dict:
+    """统计一段时间内的传输情况，供「每隔 N 小时」的汇总通知使用。
+
+    以 ``sync_records`` 为准而不是内存计数器：进程重启、重建容器都不会让
+    统计归零，也不会因为通知开关被关掉一段时间就少算。记录表本身有 2 万
+    行上限，窗口再长也不会捞出巨量数据。
+    """
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT id, local_path FROM tasks")
+        roots = {int(r["id"]): (r["local_path"] or "")
+                 for r in await cursor.fetchall()}
+        cursor = await db.execute(
+            """SELECT task_id, action, status, source, target, file_name,
+                      COALESCE(file_size, 0) AS size
+               FROM sync_records
+               WHERE created_at >= ? AND created_at <= ?""",
+            (float(since), float(until)),
+        )
+        rows = [dict(r) for r in await cursor.fetchall()]
+
+    folders: dict[str, int] = {}
+    files = uploads = downloads = deletes = 0
+    failed = skipped = 0
+    total_bytes = 0
+    failed_names: list[str] = []
+
+    for row in rows:
+        action = row["action"] or ""
+        status = row["status"] or "success"
+        if status == "failed":
+            failed += 1
+            # 只留前三个文件名，消息里点名用
+            if len(failed_names) < 3 and row["file_name"]:
+                failed_names.append(row["file_name"])
+            continue
+        if status == "skipped":
+            # 用户主动跳过的既不算传输也不算失败
+            skipped += 1
+            continue
+        if action == "upload":
+            uploads += 1
+        elif action == "download":
+            downloads += 1
+        elif action.startswith("delete"):
+            deletes += 1
+        else:
+            continue
+        files += 1
+        # 目录分布按「完成的事」算（含删除，不含失败）：这样各目录的数字
+        # 加起来正好等于「共 N 个文件」，不会对不上账
+        label = _digest_folder(roots.get(int(row["task_id"] or 0), ""),
+                               action, row["source"] or "", row["target"] or "")
+        folders[label] = folders.get(label, 0) + 1
+        if action.startswith("delete"):
+            continue                      # 删除不计流量
+        total_bytes += int(row["size"] or 0)
+
+    ordered = sorted(folders.items(), key=lambda kv: (-kv[1], kv[0]))
+    return {
+        "files": files, "uploads": uploads, "downloads": downloads,
+        "deletes": deletes, "failed": failed, "skipped": skipped,
+        "bytes": total_bytes,
+        # 只回前 8 个目录，够消息展示也够排查
+        "folders": ordered[:8], "folder_count": len(ordered),
+        "failed_names": failed_names,
+        "since": float(since), "until": float(until),
+    }
+
+
 async def db_get_record(record_id: int) -> Optional[dict]:
     async with aiosqlite.connect(str(DB_PATH)) as db:
         db.row_factory = aiosqlite.Row

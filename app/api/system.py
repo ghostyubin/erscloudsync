@@ -10,8 +10,21 @@ from pydantic import BaseModel
 from app.config import LOCAL_SYNC_ROOT, LOCAL_ROOTS, DOWNLOAD_DIR, DATA_DIR, SYNC_CONCURRENCY
 from app import database as db
 from app.services.notify import (
-    DEVICE_KEY, ENABLED_KEY, INSECURE_KEY, QUIET_KEY, QUIET_MAX, QUIET_MIN,
-    TOKEN_KEY, URL_KEY, load_config, notifier,
+    DEVICE_KEY,
+    DIGEST_ENABLED_KEY,
+    DIGEST_HOURS_KEY,
+    DIGEST_HOURS_MAX,
+    DIGEST_HOURS_MIN,
+    ENABLED_KEY,
+    INSECURE_KEY,
+    QUIET_KEY,
+    QUIET_MAX,
+    QUIET_MIN,
+    TOKEN_KEY,
+    URL_KEY,
+    clamp_digest_hours,
+    load_config,
+    notifier,
 )
 from app.services.sync_engine import (
     CONCURRENCY_MAX, CONCURRENCY_MIN, CONCURRENCY_SETTING_KEY, SyncEngine,
@@ -31,6 +44,9 @@ class NotifySettings(BaseModel):
     insecure: Optional[bool] = None
     # 设备名称：多台机器推同一个网关时，靠这条区分是谁发的
     device: Optional[str] = None
+    # 定时汇总：每 digest_hours 小时推一条「这段时间传了多少」
+    digest_enabled: Optional[bool] = None
+    digest_hours: Optional[int] = None
 
 
 class RuntimeSettings(BaseModel):
@@ -49,6 +65,7 @@ def _mask(value: str) -> str:
 
 async def _notify_payload() -> dict:
     cfg = await load_config()
+    next_at = notifier.next_digest_at(cfg)
     return {
         "enabled": cfg.enabled,
         "url": cfg.url,
@@ -59,6 +76,10 @@ async def _notify_payload() -> dict:
         "token_masked": _mask(cfg.token),
         "configured": cfg.configured,
         "endpoint": cfg.endpoint,
+        "digest_enabled": cfg.digest_enabled,
+        "digest_hours": cfg.digest_hours,
+        # 下一次汇总的时间戳，0 = 还没开始计时（刚勾选、等下个 tick 起算）
+        "digest_next_at": int(next_at),
     }
 
 
@@ -78,7 +99,9 @@ async def get_settings():
         "defaults": {"sync_concurrency": SYNC_CONCURRENCY},
         "limits": {"sync_concurrency": {"min": CONCURRENCY_MIN,
                                         "max": CONCURRENCY_MAX},
-                   "notify_quiet": {"min": QUIET_MIN, "max": QUIET_MAX}},
+                   "notify_quiet": {"min": QUIET_MIN, "max": QUIET_MAX},
+                   "notify_digest_hours": {"min": DIGEST_HOURS_MIN,
+                                           "max": DIGEST_HOURS_MAX}},
     }
 
 
@@ -113,6 +136,12 @@ async def update_settings(req: RuntimeSettings):
         # 设备名允许清空（清空后回落到 DEVICE_FALLBACK），所以不用 "if n.device" 守卫
         if n.device is not None:
             await db.db_set_setting(DEVICE_KEY, n.device.strip()[:64])
+        if n.digest_enabled is not None:
+            await db.db_set_setting(DIGEST_ENABLED_KEY,
+                                    "1" if n.digest_enabled else "0")
+        if n.digest_hours is not None:
+            hours = clamp_digest_hours(n.digest_hours)
+            await db.db_set_setting(DIGEST_HOURS_KEY, str(hours))
         notifier.invalidate_config()
         result["notify"] = await _notify_payload()
 
@@ -125,6 +154,16 @@ async def update_settings(req: RuntimeSettings):
 async def notify_test():
     """按照当前保存的配置立刻发一条测试消息，原样返回网关的响应。"""
     return await notifier.send_test()
+
+
+@router.post("/notify/digest")
+async def notify_digest():
+    """立刻按「最近 N 小时」生成并推送一条汇总，用于预览排版。
+
+    不动水位线：真正按点推送的时间点不受影响，点几次预览都不会打乱节奏。
+    这段时间没有任何传输时返回 ``skipped``，不往手机上发空消息。
+    """
+    return await notifier.send_digest(advance=False)
 
 
 @router.get("/notify/status")

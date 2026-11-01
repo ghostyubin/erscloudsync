@@ -192,6 +192,7 @@
                             <div class="settings-field-title">同步完成通知</div>
                             <p class="settings-field-desc">
                                 同步根目录下的<strong>每个文件夹</strong>单独统计：这一波文件传完、且静默 N 秒没有新文件后，推送一条汇总到 Heimdallr 网关。
+                                勾选<strong>「定时汇总」</strong>后，每 N 小时再推一条这段时间的传输小结（没有传输就不发）。
                                 地址填到域名即可（会自动补 <code>/push</code>）。
                             </p>
                         </div>
@@ -217,10 +218,19 @@
                                 <input type="number" id="setting-notify-quiet" class="input settings-number"
                                        min="10" max="3600" step="5" value="60" inputmode="numeric">
                             </div>
-                            <div class="notify-item" style="justify-content:flex-end;">
+                            <!-- 定时汇总：每隔 N 小时推一条这段时间的传输小结 -->
+                            <div class="notify-item">
+                                <span>汇总间隔（小时）</span>
+                                <input type="number" id="setting-notify-digest-hours" class="input settings-number"
+                                       min="1" max="72" step="1" value="6" inputmode="numeric">
+                            </div>
+                            <div class="notify-item notify-item-wide">
                                 <div class="notify-checks">
                                     <label class="notify-check">
                                         <input type="checkbox" id="setting-notify-enabled"> 启用通知
+                                    </label>
+                                    <label class="notify-check">
+                                        <input type="checkbox" id="setting-notify-digest"> 定时汇总
                                     </label>
                                     <label class="notify-check">
                                         <input type="checkbox" id="setting-notify-insecure"> 跳过证书校验
@@ -234,6 +244,8 @@
                                     onclick="app.saveNotifySettings()">保存</button>
                             <button class="btn btn-secondary settings-save" id="setting-notify-test"
                                     onclick="app.testNotify()">保存并发送测试</button>
+                            <button class="btn btn-secondary settings-save" id="setting-notify-digest-test"
+                                    onclick="app.testDigest()">预览汇总</button>
                             <span class="notify-result" id="setting-notify-result"></span>
                         </div>
                     </div>
