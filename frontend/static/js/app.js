@@ -866,8 +866,6 @@ const App = {
         document.getElementById('task-exclude').value = '';
         document.getElementById('task-max-size').value = '0';
         document.getElementById('task-enc-enabled').checked = false;
-        const fmtSelect = document.getElementById('task-enc-format');
-        if (fmtSelect) fmtSelect.value = 'bsenc';
         this.onEncToggle();
         document.getElementById('task-enc-warn').style.display = 'none';
         const keyLinkNew = document.getElementById('task-enc-key-link');
@@ -876,6 +874,7 @@ const App = {
         document.querySelector('input[name="sync-mode"][value="bidirectional"]').checked = true;
         document.querySelector('input[name="schedule-type"][value="scheduled"]').checked = true;
         document.getElementById('schedule-interval-group').style.display = 'block';
+        this.onSyncModeChange();
         try {
             const data = await this.api('GET', '/api/connections');
             const select = document.getElementById('task-connection');
@@ -899,8 +898,6 @@ const App = {
         document.getElementById('task-exclude').value = task.filter_exclude || '';
         document.getElementById('task-max-size').value = task.max_file_size || 0;
         document.getElementById('task-enc-enabled').checked = !!task.enc_enabled;
-        const fmtSel = document.getElementById('task-enc-format');
-        if (fmtSel) fmtSel.value = task.enc_format || 'bsenc';
         this.onEncToggle();
         document.getElementById('task-enc-warn').style.display = 'none';
         const keyLink = document.getElementById('task-enc-key-link');
@@ -910,6 +907,7 @@ const App = {
         if (syncMode) syncMode.checked = true;
         const schedType = document.querySelector(`input[name="schedule-type"][value="${task.schedule_type}"]`);
         if (schedType) schedType.checked = true;
+        this.onSyncModeChange();
         document.getElementById('schedule-interval-group').style.display = task.schedule_type === 'scheduled' ? 'block' : 'none';
         try {
             const data = await this.api('GET', '/api/connections');
@@ -922,30 +920,40 @@ const App = {
         this.openModal('modal-task');
     },
 
-    /* 勾了「加密上传」才显示格式选择——不加密时选格式没有意义。 */
-    onEncToggle() {
-        const on = !!(document.getElementById('task-enc-enabled') || {}).checked;
-        const group = document.getElementById('task-enc-format-group');
-        if (group) group.style.display = on ? '' : 'none';
-        if (on) this.onEncFormatChange();
+    /* 同步方向决定加密这一栏怎么说：仅下载时根本不会上传，写「加密上传」
+       会让人以为选错了方向；改成「下载时自动解密」，开关本身仍然要留——
+       没有密钥的任务解不开云端的密文。 */
+    onSyncModeChange() {
+        const mode = (document.querySelector('input[name="sync-mode"]:checked') || {}).value
+            || 'bidirectional';
+        const downloadOnly = mode === 'download_only';
+        const label = document.getElementById('task-enc-label');
+        const desc = document.getElementById('task-enc-desc');
+        const keyDesc = document.getElementById('task-enc-key-desc');
+        if (label) label.textContent = downloadOnly ? '下载时自动解密' : '客户端加密';
+        if (desc) {
+            desc.innerHTML = downloadOnly
+                ? '云端文件如果是本程序加密的，下载落地前会<strong>自动解密</strong>成明文，'
+                  + '文件名和路径保持不变。这个任务只往本地写，不会上传任何东西；'
+                  + '但<strong>开关仍要勾上</strong>，否则任务拿不到密钥，密文解不开。'
+                : '上传前在本地加密，网盘上只有密文，文件名和路径保持不变。'
+                  + '<strong>只影响之后新传的文件</strong>，云端已有的明文文件不会重传，下载时原样取回。';
+        }
+        if (keyDesc) {
+            keyDesc.textContent = downloadOnly
+                ? ' 这个任务的私钥可以离线解同一目录下的密文。'
+                : ' 每个加密任务的私钥会在创建时自动下载一次。';
+        }
     },
 
-    onEncFormatChange() {
-        const sel = document.getElementById('task-enc-format');
-        const desc = document.getElementById('task-enc-format-desc');
-        if (!sel || !desc) return;
-        desc.innerHTML = sel.value === 'syno'
-            ? '文件头里带一段用密码封装的密钥，所以<strong>只用密码就能解开</strong>，'
-              + '也就能直接丢进群晖的 Cloud Sync Decryption Tool（选密码或 private.pem 都行）。'
-              + '代价是它的密钥派生（MD5 迭代 1000 次）和加密模式（AES-CBC 无逐块认证）都'
-              + '明显弱于标准格式——<strong>这是为了通用性做的取舍</strong>。'
-              + (this.synoReady ? '' :
-                  '<br><span style="color:var(--color-warning)">⚠️ 当前库里没有密码副本：'
-                  + '请先到「全局设置 → 客户端加密 → 解锁」重新输一次密码，'
-                  + '否则选这个格式会建不了任务。</span>')
-            : 'AES-256-GCM 分块加密，每块带认证标签，密码经 scrypt 派生。'
-              + '被改过一位就会报错，但<strong>只能用本项目的工具解密</strong>'
-              + '（docker exec 调 bsenc-decrypt.py，或者界面上导出密钥包）。';
+    /* 勾了加密才有必要提示「还没设置密码」。 */
+    onEncToggle() {
+        const on = !!(document.getElementById('task-enc-enabled') || {}).checked;
+        const keyRow = document.getElementById('task-enc-key-row');
+        const keyLink = document.getElementById('task-enc-key-link');
+        if (keyRow) keyRow.style.display = on ? '' : 'none';
+        if (keyLink && !on) keyLink.style.display = 'none';
+        if (on) this.onSyncModeChange();
     },
 
     async saveTask() {
@@ -960,7 +968,6 @@ const App = {
         const exclude = document.getElementById('task-exclude').value.trim();
         const maxSizeMB = parseInt(document.getElementById('task-max-size').value) || 0;
         const encEnabled = !!document.getElementById('task-enc-enabled').checked;
-        const encFormat = (document.getElementById('task-enc-format') || {}).value || 'bsenc';
         if (encEnabled && !this.cryptoReady) {
             document.getElementById('task-enc-warn').style.display = 'block';
             this.toast('请先到「全局设置 → 客户端加密」设置密码', 'warning');
@@ -974,7 +981,6 @@ const App = {
             filter_include: include, filter_exclude: exclude,
             max_file_size: maxSizeMB * 1024 * 1024,
             enc_enabled: encEnabled,
-            enc_format: encFormat,
         };
         try {
             let r;
@@ -985,12 +991,9 @@ const App = {
                 r = await this.api('POST', '/api/tasks', payload);
                 this.toast('任务已创建', 'success');
             }
-            // 开加密的任务会顺带把「私钥文件」给出来（相当于 Synology 创建任务
-            // 时导出的 private.pem）。密码忘了就只剩它了，所以必须让用户存下来。
-            if (r && r.syno_private_pem) {
-                this._saveText(r.syno_private_pem, 'private.pem');
-                this.toast('已导出 private.pem，请离线保存（群晖工具和本工具都能用它解密）', 'success');
-            } else if (r && r.private_key) {
+            // 开加密的任务会顺带把「私钥文件」给出来。密码忘了就只剩它了，
+            // 所以必须让用户存下来。
+            if (r && r.private_key) {
                 this._saveJson(r.private_key, `baudusync-task-${r.private_key.task_id}-key.json`);
                 this.toast('已导出任务私钥，请离线保存（忘了密码就靠它）', 'success');
             } else if (r && r.key_error) {
@@ -1009,26 +1012,9 @@ const App = {
         if (!pw) return;
         try {
             const r = await this.api('POST', `/api/tasks/${id}/key`, { password: pw });
-            if (r && r.format === 'syno-taskkey') {
-                // 群晖格式就是一份 PEM，官方解密工具里选「私钥」直接用它
-                this._saveText(r.private_pem, r.file_name || 'private.pem');
-            } else {
-                this._saveJson(r, `baudusync-task-${r.task_id}-key.json`);
-            }
+            this._saveJson(r, `baudusync-task-${r.task_id}-key.json`);
             this.toast('私钥已导出，请离线保存', 'success');
         } catch (e) { this.toast('导出失败: ' + e.message, 'error'); }
-    },
-
-    _saveText(text, filename) {
-        const blob = new Blob([text], { type: 'application/x-pem-file' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 2000);
     },
 
     _saveJson(obj, filename) {
@@ -1456,24 +1442,17 @@ const App = {
         const badge = el('setting-crypto-state');
         const initialized = !!st.initialized;
         const unlocked = !!st.unlocked;
-        // 任务表单要用它决定「加密上传」能不能勾
+        // 任务表单要用它决定「加密」能不能勾
         this.cryptoReady = initialized && unlocked;
-        // 群晖格式要密码原文；老库升级上来还没有这一份，得重新输一次密码
-        this.synoReady = !!st.syno_ready;
 
         const show = (id, on) => { const n = el(id); if (n) n.style.display = on ? '' : 'none'; };
-        // 老库升级上来的没有密码副本：即便已解锁也要让用户再输一次，
-        // 否则「群晖兼容格式」永远是灰的且没有入口补。
-        const needSynoPwd = initialized && unlocked && !st.syno_ready;
-        // 没设置过密码 → 只给「设置密码」；设置过但自动解锁失败（或缺密码副本）→ 给「解锁」
+        // 没设置过密码 → 只给「设置密码」；设置过但自动解锁失败 → 给「解锁」
         show('setting-crypto-setup-row', !initialized);
         show('setting-crypto-setup-btn', !initialized);
-        show('setting-crypto-unlock-row', initialized && (!unlocked || needSynoPwd));
-        show('setting-crypto-unlock-btn', initialized && (!unlocked || needSynoPwd));
+        show('setting-crypto-unlock-row', initialized && !unlocked);
+        show('setting-crypto-unlock-btn', initialized && !unlocked);
         const unlLabel = document.querySelector('#setting-crypto-unlock-row span');
-        if (unlLabel) unlLabel.textContent = needSynoPwd
-            ? '重新输一次密码（启用群晖兼容格式需要密码原文）'
-            : '输入密码解锁';
+        if (unlLabel) unlLabel.textContent = '输入密码解锁';
         show('setting-crypto-change-btn', initialized && unlocked);
         show('setting-crypto-export-btn', initialized && unlocked);
         show('setting-crypto-block-row', initialized);
@@ -1485,7 +1464,6 @@ const App = {
             if (initialized && unlocked) { text = '已启用'; color = 'var(--color-success)'; }
             else if (initialized) { text = '待解锁'; color = 'var(--color-warning)'; }
             if (st.tasks) text += ` · ${st.tasks} 个任务`;
-            if (initialized && unlocked && !st.syno_ready) text += ' · 群晖格式需重输密码';
             badge.textContent = text;
             badge.style.color = color;
         }

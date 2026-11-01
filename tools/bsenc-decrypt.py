@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
-"""BauduSync 离线解密工具（bsenc / 群晖 Cloud Sync 两种格式）。
+"""BauduSync 离线解密工具。
 
-对标 Synology 的 Cloud Sync Decryption Tool：不依赖 BauduSync 本体，只用
-标准库 + ``cryptography``（解群晖格式还要 ``lz4``），拷到任何机器上都能跑。
+不依赖 BauduSync 本体，只用标准库 + ``cryptography``，拷到任何机器上都能跑。
 **两种凭据都能单独解密**：
 
-* ``--password``   只要密码（两种格式都支持）
-* ``--key``        私钥文件：``private.pem``（群晖格式）或任务导出的 ``*-key.json``
-
-能识别的密文有两种，同一个目录里混着也没关系，按文件头自动判断：
-
-* ``BSENC``          —— 本项目自研的 AES-256-GCM（每块带认证）
-* ``__CLOUDSYNC_ENC__`` —— 群晖 Cloud Sync 格式，**群晖官方那个桌面工具也能解**
+* ``--password``   只要密码（文件头里带钥匙牌，默认开）
+* ``--key``        任务导出的 ``*-key.json``（密码忘了时唯一的出路）
 
     # 只看密钥概况，不写任何文件（给上目录还会统计各格式密文的个数）
     python3 bsenc-decrypt.py info --db /config/baudusync.db
@@ -21,7 +15,6 @@
 
     # 用任务私钥（不需要密码）
     python3 bsenc-decrypt.py decrypt --key task-1-key.json -o ./plain ~/cloud
-    python3 bsenc-decrypt.py decrypt --key private.pem -o ./plain ~/cloud
 
     # 原地解密（用明文覆盖密文）
     python3 bsenc-decrypt.py decrypt --password 'xxx' --in-place ~/cloud/照片
@@ -30,10 +23,8 @@
     python3 bsenc-decrypt.py decrypt --password 'xxx' --verify-only ~/cloud
 
 补充来源（可选，不是必需）：``--db`` 直接读 BauduSync 的数据库、``--keys``
-读界面导出的密钥包。它们只对 ``BSENC`` 格式有意义——它的文件头里带的是
-「加密那一刻的密码」封装的钥匙牌，改过密码之后老文件要用当时的密码；库里
-的密钥则永远是最新的。群晖格式的文件头里自带 salt 和包裹好的会话密钥，
-给对密码就能解，不需要数据库。
+读界面导出的密钥包。文件头里的钥匙牌是「加密那一刻的密码」封装的，改过
+密码之后老文件要用当时的密码；库里的密钥则永远是最新的。
 
 文件格式见 README 的「客户端加密」章节。
 """
@@ -137,253 +128,6 @@ def read_header(path: str) -> Optional[dict]:
             "block": block, "aad": aad, "data_offset": offset}
 
 
-# --------------------------------------------------------------------------
-# 群晖 Cloud Sync 格式（app/services/syno_crypto.py 的独立精简版，只解不加密）
-# --------------------------------------------------------------------------
-SYNO_MAGIC = b"__CLOUDSYNC_ENC__"
-SYNO_MAGIC_HASH = hashlib.md5(SYNO_MAGIC).hexdigest().encode("ascii")
-
-
-def is_syno(path: str) -> bool:
-    """只看魔数。群晖这个 17 字节串不像 ``BSENC`` 那样容易撞上。"""
-    try:
-        with open(path, "rb") as fh:
-            return fh.read(len(SYNO_MAGIC)) == SYNO_MAGIC
-    except OSError:
-        return False
-
-
-class _SynoReader:
-    """带一个字节回推的读取器——流式解密要靠它判断哪一块是最后一块。"""
-
-    def __init__(self, fh):
-        self._fh = fh
-        self._pending: Optional[bytes] = None
-
-    def read(self, n: int) -> bytes:
-        if n <= 0:
-            return b""
-        if self._pending is None:
-            return self._fh.read(n)
-        head, self._pending = self._pending, None
-        if len(head) >= n:
-            rest = head[n:]
-            if rest:
-                self._pending = rest
-            return head[:n]
-        return head + self._fh.read(n - len(head))
-
-    def peek(self) -> Optional[int]:
-        if self._pending is None:
-            self._pending = self._fh.read(1)
-        return self._pending[0] if self._pending else None
-
-
-def _syno_value(r: _SynoReader):
-    tag = r.read(1)
-    if not tag:
-        raise ToolError("群晖格式文件在解析字典时意外结束")
-    tag = tag[0]
-    if tag == 0x42:
-        return _syno_dict(r)
-    if tag == 0x40:
-        raise ToolError("群晖格式的字典结构损坏")
-    if tag in (0x10, 0x11):
-        raw_len = r.read(2)
-        if len(raw_len) != 2:
-            raise ToolError("群晖格式文件被截断")
-        raw = r.read(struct.unpack(">H", raw_len)[0])
-        return raw.decode("utf-8", "replace") if tag == 0x10 else raw
-    if tag == 0x01:
-        size = r.read(1)
-        if not size:
-            raise ToolError("群晖格式文件被截断")
-        n = size[0]
-        return int.from_bytes(r.read(n), "big") if n else 0
-    raise ToolError(f"群晖格式里有未知的字段类型 0x{tag:02X}")
-
-
-def _syno_dict(r: _SynoReader) -> dict:
-    out: dict = {}
-    while True:
-        b = r.peek()
-        if b is None:
-            raise ToolError("群晖格式的字典没有结束标记，文件可能被截断")
-        if b == 0x40:
-            r.read(1)
-            return out
-        key = _syno_value(r)
-        if not isinstance(key, str):
-            raise ToolError("群晖格式的字典键不是字符串")
-        out[key] = _syno_value(r)
-
-
-def _openssl_kdf(password: bytes, salt: bytes, key_size: int = 32,
-                 iv_size: int = 16) -> tuple:
-    """openssl enc 用的老 KDF：有盐迭代 1000 次 MD5，无盐只算 1 次。"""
-    rounds = 1 if salt == b"" else 1000
-    material = b""
-    prev = b""
-    while len(material) < key_size + iv_size:
-        block = prev + password + salt
-        for _ in range(rounds):
-            block = hashlib.md5(block).digest()
-        prev = block
-        material += block
-    return material[:key_size], material[key_size:key_size + iv_size]
-
-
-def _cbc_decrypt(key: bytes, iv: bytes):
-    return Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
-
-
-def _pkcs7_strip(data: bytes) -> bytes:
-    if not data or len(data) % 16:
-        raise ToolError("群晖格式的解密结果长度异常")
-    pad = data[-1]
-    if not 1 <= pad <= 16 or data[-pad:] != bytes([pad]) * pad:
-        raise ToolError("填充校验失败：密码不对，或者文件被改过")
-    return data[:-pad]
-
-
-def _syno_hash(prefix: str, data: bytes) -> str:
-    return prefix + hashlib.md5(prefix.encode("ascii") + data).hexdigest()
-
-
-def read_syno_info(path: str) -> Optional[dict]:
-    """只解析第一个字典（加密参数），不做解密。"""
-    try:
-        with open(path, "rb") as fh:
-            if fh.read(len(SYNO_MAGIC)) != SYNO_MAGIC:
-                return None
-            if fh.read(len(SYNO_MAGIC_HASH)) != SYNO_MAGIC_HASH:
-                return None
-            info = _syno_value(_SynoReader(fh))
-    except (OSError, ToolError):
-        return None
-    return info if isinstance(info, dict) and "enc_key1" in info else None
-
-
-def _syno_session(info: dict, password: Optional[str],
-                  pem: Optional[bytes]) -> bytes:
-    """拿到 64 字节的 session_key（十六进制文本）或 v1 的原始字节。"""
-    if password is not None:
-        salt = (info.get("salt") or "").encode("ascii")
-        key, iv = _openssl_kdf(password.encode("utf-8"), salt)
-        dec = _cbc_decrypt(key, iv)
-        blob = base64.b64decode(info["enc_key1"])
-        session = _pkcs7_strip(dec.update(blob) + dec.finalize())
-        check = info.get("key1_hash") or ""
-        if len(check) >= 42 and _syno_hash(check[:10],
-                                           password.encode("utf-8")) != check:
-            raise ToolError("密码不正确")
-        return session
-    if pem is None:
-        raise ToolError("群晖格式需要密码或者 private.pem")
-    if "enc_key2" not in info:
-        raise ToolError("这个文件里没有可用私钥解的那一份")
-    priv = serialization.load_pem_private_key(pem, password=None)
-    try:
-        return priv.decrypt(base64.b64decode(info["enc_key2"]), padding.OAEP(
-            mgf=padding.MGF1(hashes.SHA1()), algorithm=hashes.SHA1(), label=None))
-    except ValueError as exc:
-        raise ToolError(f"私钥与这个文件不匹配：{exc}") from exc
-
-
-def syno_decrypt_file(src: str, dst: Optional[str],
-                      password: Optional[str] = None,
-                      pem: Optional[bytes] = None) -> int:
-    """解密一个群晖格式的文件，返回明文字节数。``dst`` 为 None 表示只校验。"""
-    try:
-        import lz4.frame as lz4frame
-    except ImportError:
-        raise ToolError("群晖格式用 LZ4 压缩，需要先 pip install lz4")
-
-    with open(src, "rb") as fin:
-        if fin.read(len(SYNO_MAGIC)) != SYNO_MAGIC:
-            raise ToolError("不是群晖 Cloud Sync 的加密文件")
-        if fin.read(len(SYNO_MAGIC_HASH)) != SYNO_MAGIC_HASH:
-            raise ToolError("群晖格式的魔数校验失败，文件可能损坏")
-        r = _SynoReader(fin)
-        info = _syno_value(r)
-        if not isinstance(info, dict) or "enc_key1" not in info:
-            raise ToolError("群晖格式的文件头缺少加密参数")
-
-        session = _syno_session(info, password, pem)
-        check = info.get("session_key_hash") or ""
-        if len(check) >= 42 and _syno_hash(check[:10], session) != check:
-            raise ToolError("会话密钥校验失败")
-
-        try:
-            session_raw = (bytes.fromhex(session.decode("ascii"))
-                           if info.get("salt") else session)
-        except (ValueError, UnicodeDecodeError):
-            raise ToolError("会话密钥格式异常")
-        key, iv = _openssl_kdf(session_raw, b"")
-        dec = _cbc_decrypt(key, iv)
-
-        compress = bool(int(info.get("compress", 0) or 0))
-        decomp = lz4frame.LZ4FrameDecompressor() if compress else None
-        digest = hashlib.md5()
-        written = 0
-        carry = b""
-        meta: dict = {}
-
-        out = open(dst, "wb") if dst else open(os.devnull, "wb")
-        try:
-            def emit(plain: bytes) -> None:
-                nonlocal written
-                if not plain:
-                    return
-                digest.update(plain)
-                out.write(plain)
-                written += len(plain)
-
-            def flush_block(plain: bytes) -> None:
-                emit(decomp.decompress(plain) if decomp is not None else plain)
-
-            while True:
-                nxt = r.peek()
-                if nxt is None or nxt == 0x40:
-                    if nxt == 0x40:
-                        r.read(1)
-                    break
-                block = _syno_value(r)
-                if not isinstance(block, dict):
-                    raise ToolError("群晖格式的数据块异常")
-                if block.get("type") == "metadata":
-                    meta = block
-                    continue
-                payload = block.get("data")
-                if not isinstance(payload, (bytes, bytearray)):
-                    raise ToolError("群晖格式的数据块里没有内容")
-                if len(payload) % 16:
-                    raise ToolError("群晖格式的密文块长度不是 16 的倍数")
-                if carry:
-                    flush_block(carry)
-                carry = dec.update(bytes(payload))
-
-            final = dec.finalize()
-            if carry or final:
-                tail = _pkcs7_strip(carry + final)
-                if tail:
-                    flush_block(tail)
-            if decomp is not None:
-                try:
-                    rest = decomp.decompress(b"")
-                except Exception:  # noqa: BLE001 - 到流尾时个别实现会抛错
-                    rest = b""
-                if rest:
-                    emit(rest)
-        finally:
-            out.close()
-
-        expected = meta.get("file_md5") or info.get("file_md5")
-        if expected and digest.hexdigest() != expected:
-            raise ToolError("MD5 校验失败：文件不完整或被改过")
-    return written
-
-
 def looks_encrypted(path: str) -> bool:
     """和本体一样的判据：魔数 + 版本 + 分块区间 + 最小长度。
 
@@ -484,7 +228,6 @@ class Credentials:
 
     def __init__(self) -> None:
         self.static: list[tuple[str, bytes]] = []
-        self.syno_pems: list[tuple[str, bytes]] = []
         self.password: Optional[str] = None
         self.kdf: dict = dict(KDF_DEFAULTS)
         self.sources: list[str] = []
@@ -555,28 +298,17 @@ class Credentials:
                            data.get("keys") or [])
 
     def add_taskkey(self, path: str) -> None:
-        """任务私钥文件。两种都认：``*-key.json``（bsenc）和 ``private.pem``（群晖）。"""
+        """任务的 ``*-key.json`` 私钥文件。"""
         p = Path(path).expanduser()
         try:
             text = p.read_text("utf-8")
         except OSError as exc:
             raise ToolError(f"读不到私钥文件：{exc}") from exc
 
-        if "BEGIN" in text and "PRIVATE KEY" in text:
-            # 群晖格式的 private.pem：RSA 私钥，直接用来解 enc_key2
-            try:
-                from cryptography.hazmat.primitives import serialization
-                serialization.load_pem_private_key(text.encode("utf-8"), password=None)
-            except Exception as exc:  # noqa: BLE001
-                raise ToolError(f"{p.name} 不是可用的 RSA 私钥：{exc}") from exc
-            self.syno_pems.append((p.name, text.encode("utf-8")))
-            self.sources.append(f"PEM 私钥 {p.name}")
-            return
-
         try:
             data = json.loads(text)
         except json.JSONDecodeError as exc:
-            raise ToolError(f"私钥文件既不是 PEM 也不是合法 JSON：{exc}") from exc
+            raise ToolError(f"私钥文件不是合法 JSON：{exc}") from exc
         if data.get("format") != "bsenc-taskkey":
             raise ToolError(f"{p.name} 不是 BauduSync 的任务私钥文件")
         label = f"{p.name}（任务 {data.get('task_id')} {data.get('task_name') or ''}）"
@@ -662,8 +394,6 @@ class Credentials:
             bits.append("密码")
         if self.static:
             bits.append(f"{len(self.static)} 把现成密钥")
-        if self.syno_pems:
-            bits.append(f"{len(self.syno_pems)} 份 PEM 私钥")
         if not bits:
             bits.append("未指定")
         return "、".join(bits)
@@ -720,27 +450,19 @@ def _scan_targets(args) -> None:
     if not pairs:
         print("目标里没有文件。")
         return
-    n_syno = n_bsenc = n_plain = 0
-    b_syno = b_bsenc = 0
+    n_enc = n_plain = 0
+    b_enc = 0
     for f, _rel in pairs:
-        if is_syno(str(f)):
-            n_syno += 1
-            b_syno += f.stat().st_size
-        elif looks_encrypted(str(f)):
-            n_bsenc += 1
-            b_bsenc += f.stat().st_size
+        if looks_encrypted(str(f)):
+            n_enc += 1
+            b_enc += f.stat().st_size
         else:
             n_plain += 1
     print(f"扫描 {len(pairs)} 个文件：")
-    if n_syno:
-        print(f"  群晖格式密文  {n_syno} 个（{human(b_syno)}）")
-    if n_bsenc:
-        print(f"  标准格式密文  {n_bsenc} 个（{human(b_bsenc)}）")
+    if n_enc:
+        print(f"  密文   {n_enc} 个（{human(b_enc)}）")
     if n_plain:
-        print(f"  非密文        {n_plain} 个（解密时默认跳过）")
-    if n_syno and not n_bsenc:
-        print("  提示：这批文件是群晖格式，同样可以直接用 Synology 的"
-              " Cloud Sync Decryption Tool 解。")
+        print(f"  明文   {n_plain} 个（解密时默认跳过，--copy-plain 可一并复制）")
 
 
 def cmd_info(args) -> int:
@@ -755,12 +477,10 @@ def _info_report(args) -> int:
     for s in cred.sources:
         print(f"  来源：{s}")
     if not cred._salt:
-        if not cred.password and not cred.static and not cred.syno_pems:
+        if not cred.password and not cred.static:
             raise ToolError("请至少给出 --password、--key、--keys 或 --db 之一")
-        if cred.syno_pems:
-            print(f"PEM 私钥：{len(cred.syno_pems)} 份（解群晖格式文件用）")
         print("没有数据库/密钥包：解密时按每个文件头里的钥匙牌 + 密码来解。")
-        print("（这种用法只要密码，和 Synology 的 Cloud Sync Decryption Tool 一致）")
+        print("（这种用法只要密码，不需要数据库）")
         return 0
 
     print(f"salt：{_b64(cred._salt)}")
@@ -777,15 +497,10 @@ def _info_report(args) -> int:
         how = cred.unlock(args.password)
         if not cred.static:
             print(f"（{how}）没有解出任何任务密钥。")
-            if cred.syno_pems:
-                print(f"不过有 {len(cred.syno_pems)} 份 PEM 私钥，群晖格式的文件照样能解。")
             return 0
         print(f"解锁成功（{how}），可用密钥 {len(cred.static)} 把：")
         for label, dek in cred.static:
             print(f"  - {label}：{dek[:4].hex()}…{dek[-2:].hex()}")
-        return 0
-    if cred.syno_pems:
-        print(f"有 {len(cred.syno_pems)} 份 PEM 私钥（解群晖格式文件用），没给密码，跳过解锁验证。")
         return 0
     print("（没给密码，也没有密钥文件，未做解锁验证）")
     return 0
@@ -797,7 +512,7 @@ def cmd_decrypt(args) -> int:
     if cred._salt:
         # 先解锁：没有密码时可能是靠 enc.key 解开的，这时才有现成密钥
         cred.unlock(args.password)
-    if not cred.password and not cred.static and not cred.syno_pems:
+    if not cred.password and not cred.static:
         raise ToolError("没有可用的解密凭据")
 
     pairs = collect(targets)
@@ -827,13 +542,10 @@ def cmd_decrypt(args) -> int:
     for index, (src, rel) in enumerate(pairs, 1):
         name = f"{rel}"
         try:
-            # 两种密文混在同一个目录里也没关系，按文件头判断
-            if is_syno(str(src)):
-                kind = "syno"
-            elif looks_encrypted(str(src)):
-                kind = "bsenc"
-            else:
+            if not looks_encrypted(str(src)):
                 kind = None
+            else:
+                kind = "bsenc"
 
             if kind is None:
                 skipped += 1
@@ -858,10 +570,7 @@ def cmd_decrypt(args) -> int:
             else:
                 target = str(src)
 
-            if kind == "syno":
-                written = _try_syno(src, target, cred)
-            else:
-                written = _try_keys(src, target, cred, read_header(str(src)))
+            written = _try_keys(src, target, cred, read_header(str(src)))
             ok += 1
             total_plain += written
             _say(args, f"[{index}/{len(pairs)}] {name}  → {human(written)}")
@@ -887,26 +596,9 @@ def cmd_decrypt(args) -> int:
         print(f"  … 还有 {len(errors) - 20} 个错误")
     if no_key and failed == no_key:
         print("\n提示：这些文件都没有可用的凭据。\n"
-              "  · BSENC 文件要靠密码解，需要文件头里带钥匙牌（默认会带）；"
-              "早期版本或关掉该选项的，请改用 --key 私钥、--keys 密钥包或 --db。\n"
-              "  · 群晖格式文件需要密码，或者它对应任务导出的 private.pem。")
+              "  · 密文要靠密码解，需要文件头里带钥匙牌（默认会带）；"
+              "早期版本或关掉该选项的，请改用 --key 私钥、--keys 密钥包或 --db。")
     return 0 if failed == 0 else 1
-
-
-def _try_syno(src: str, dst: Optional[str], cred: Credentials) -> int:
-    """群晖格式：先试密码，再挨个试 private.pem。"""
-    last: Optional[Exception] = None
-    if cred.password:
-        try:
-            return syno_decrypt_file(src, dst, cred.password, None)
-        except ToolError as exc:
-            last = exc
-    for _label, pem in cred.syno_pems:
-        try:
-            return syno_decrypt_file(src, dst, None, pem)
-        except ToolError as exc:
-            last = exc
-    raise last or ToolError("群晖格式需要密码或者 private.pem")
 
 
 def _try_keys(src: str, dst: Optional[str], cred: Credentials,
@@ -975,7 +667,7 @@ def _credentials(args) -> Credentials:
         cred.add_key(f"--dek #{i + 1}", _unb64(text.strip()))
     if args.scrypt_n:
         cred.kdf = {**cred.kdf, "n": int(args.scrypt_n)}
-    if not (cred.password or cred.static or cred.syno_pems or cred._salt):
+    if not (cred.password or cred.static or cred._salt):
         raise ToolError("请用 --password、--key、--keys 或 --db 指定凭据（详见 --help）")
     return cred
 
@@ -984,14 +676,12 @@ def _credentials(args) -> Credentials:
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         prog="bsenc-decrypt",
-        description="BauduSync 离线解密工具：用密码或私钥还原加密文件"
-                    "（同时支持群晖 Cloud Sync 格式）。",
+        description="BauduSync 离线解密工具：用密码或私钥还原加密文件。",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "例：\n"
             "  bsenc-decrypt decrypt --password 'xxx' -o ./plain ~/cloud/照片\n"
             "  bsenc-decrypt decrypt --key task-1-key.json -o ./plain ~/cloud\n"
-            "  bsenc-decrypt decrypt --key private.pem -o ./plain ~/cloud\n"
             "  bsenc-decrypt decrypt --db /config/baudusync.db -o ./plain ~/cloud\n"
             "  bsenc-decrypt decrypt --password 'xxx' --verify-only ~/cloud\n"
             "  bsenc-decrypt info --db /config/baudusync.db\n"
@@ -1001,7 +691,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     def common(p):
         p.add_argument("--password", help="加密密码；不给会交互式询问")
         p.add_argument("--key", action="append",
-                       help="私钥文件（可重复）：*-key.json 或群晖格式的 private.pem")
+                       help="任务私钥文件（可重复）：*-key.json")
         p.add_argument("--keys", help="界面导出的密钥包 json（只对 BSENC 格式有用）")
         p.add_argument("--db", help="BauduSync 的 baudusync.db 路径（只对 BSENC 格式有用）")
         p.add_argument("--keyfile", help="密钥文件路径（默认取数据库同目录的 enc.key）")

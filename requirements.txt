@@ -8,6 +8,3 @@ apscheduler==3.11.0
 watchdog==6.0.0
 httpx==0.28.1
 cryptography==44.0.0
-# 群晖兼容格式（enc_format=syno）要用 LZ4 压缩，官方解密工具假定数据是
-# LZ4 frame。纯 Python 备选也够快，但有 wheel 就用 C 扩展。
-lz4==4.4.5
