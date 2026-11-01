@@ -939,6 +939,10 @@ const App = {
               + '也就能直接丢进群晖的 Cloud Sync Decryption Tool（选密码或 private.pem 都行）。'
               + '代价是它的密钥派生（MD5 迭代 1000 次）和加密模式（AES-CBC 无逐块认证）都'
               + '明显弱于标准格式——<strong>这是为了通用性做的取舍</strong>。'
+              + (this.synoReady ? '' :
+                  '<br><span style="color:var(--color-warning)">⚠️ 当前库里没有密码副本：'
+                  + '请先到「全局设置 → 客户端加密 → 解锁」重新输一次密码，'
+                  + '否则选这个格式会建不了任务。</span>')
             : 'AES-256-GCM 分块加密，每块带认证标签，密码经 scrypt 派生。'
               + '被改过一位就会报错，但<strong>只能用本项目的工具解密</strong>'
               + '（docker exec 调 bsenc-decrypt.py，或者界面上导出密钥包）。';
@@ -1454,13 +1458,22 @@ const App = {
         const unlocked = !!st.unlocked;
         // 任务表单要用它决定「加密上传」能不能勾
         this.cryptoReady = initialized && unlocked;
+        // 群晖格式要密码原文；老库升级上来还没有这一份，得重新输一次密码
+        this.synoReady = !!st.syno_ready;
 
         const show = (id, on) => { const n = el(id); if (n) n.style.display = on ? '' : 'none'; };
-        // 没设置过密码 → 只给「设置密码」；设置过但自动解锁失败 → 只给「解锁」
+        // 老库升级上来的没有密码副本：即便已解锁也要让用户再输一次，
+        // 否则「群晖兼容格式」永远是灰的且没有入口补。
+        const needSynoPwd = initialized && unlocked && !st.syno_ready;
+        // 没设置过密码 → 只给「设置密码」；设置过但自动解锁失败（或缺密码副本）→ 给「解锁」
         show('setting-crypto-setup-row', !initialized);
         show('setting-crypto-setup-btn', !initialized);
-        show('setting-crypto-unlock-row', initialized && !unlocked);
-        show('setting-crypto-unlock-btn', initialized && !unlocked);
+        show('setting-crypto-unlock-row', initialized && (!unlocked || needSynoPwd));
+        show('setting-crypto-unlock-btn', initialized && (!unlocked || needSynoPwd));
+        const unlLabel = document.querySelector('#setting-crypto-unlock-row span');
+        if (unlLabel) unlLabel.textContent = needSynoPwd
+            ? '重新输一次密码（启用群晖兼容格式需要密码原文）'
+            : '输入密码解锁';
         show('setting-crypto-change-btn', initialized && unlocked);
         show('setting-crypto-export-btn', initialized && unlocked);
         show('setting-crypto-block-row', initialized);
@@ -1472,6 +1485,7 @@ const App = {
             if (initialized && unlocked) { text = '已启用'; color = 'var(--color-success)'; }
             else if (initialized) { text = '待解锁'; color = 'var(--color-warning)'; }
             if (st.tasks) text += ` · ${st.tasks} 个任务`;
+            if (initialized && unlocked && !st.syno_ready) text += ' · 群晖格式需重输密码';
             badge.textContent = text;
             badge.style.color = color;
         }
