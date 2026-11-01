@@ -289,7 +289,9 @@ class KeySet:
             raise ToolError("需要密码：没有可用的自动解锁密钥文件")
 
         if not self.tasks:
-            raise ToolError("这套配置里没有任何任务的加密密钥（可能还没开过加密任务）")
+            # 解锁本身是成功的，只是还没有任何任务生成过密钥（加密任务第一次
+            # 上传时才生成）。这里不算错误，由调用方决定怎么提示。
+            return how
         self.deks = [(t["id"], t["name"] or f"任务 {t['id']}",
                       _unwrap(kek, t["wrapped"], t["id"])) for t in self.tasks]
         return how
@@ -363,6 +365,10 @@ def cmd_info(args) -> int:
         print(f"  - #{t['id']} {t['name']}")
     if args.password or (ks.sealed and ks.keyfile and ks.keyfile.is_file()):
         how = ks.unlock(args.password)
+        if not ks.deks:
+            print(f"解锁成功（{how}），但还没有任务生成过加密密钥——")
+            print("加密任务第一次上传时才会生成，现在没有东西可解。")
+            return 0
         print(f"解锁成功（{how}），可用密钥 {len(ks.deks)} 把：")
         for tid, label, dek in ks.deks:
             # 只露指纹，别把密钥打进日志
@@ -375,11 +381,13 @@ def cmd_info(args) -> int:
 def cmd_decrypt(args) -> int:
     targets = [Path(t).expanduser() for t in args.targets]
     ks = _load_keyset(args, need_unlock=True)
-    how = ks.unlock(args.password)
+    how = "命令行直接给的密钥"
+    if ks.tasks or ks.salt:
+        how = ks.unlock(args.password)
     if args.dek:
         ks.add_raw_deks(args.dek)
     if not ks.deks:
-        raise ToolError("没有可用密钥")
+        raise ToolError("没有可用的密钥：这套配置里还没有任务生成过加密密钥")
 
     pairs = collect(targets)
     if not pairs:
