@@ -845,13 +845,21 @@ class SyncEngine:
                                 what=f"upload {os.path.basename(op.local_path)}",
                                 on_retry=_reset_progress,
                             )
+                            # 云端实际存了多少字节：加密时是密文大小，普通任务
+                            # 就是明文大小。下一轮靠它判断「云端有没有变」。
+                            # 直接问文件系统，不用 encrypted_size(file_size)
+                            # 推算——两者只有在源文件没被改过时才相等，一旦
+                            # 对不上，下一轮就会误判「云端变了」。
+                            if staged:
+                                try:
+                                    uploaded_size = os.path.getsize(staged)
+                                except OSError:
+                                    uploaded_size = crypto.encrypted_size(file_size)
+                            else:
+                                uploaded_size = file_size
                         finally:
                             if staged:
                                 crypto.remove_temp(staged)
-                        # 云端实际存了多少字节：加密时是密文大小，普通任务就是
-                        # 明文大小。下一轮靠它判断「云端有没有变」。
-                        uploaded_size = (crypto.encrypted_size(file_size)
-                                         if staged else file_size)
                         # Pop before counting: the live per-direction totals
                         # must never hold the same bytes twice in one sample.
                         progress.active_transfers.pop(transfer_id, None)

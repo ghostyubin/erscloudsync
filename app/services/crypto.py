@@ -93,20 +93,33 @@ class DecryptError(CryptoError):
 # 文件格式
 # --------------------------------------------------------------------------
 def encrypted_size(plain_size: int) -> int:
-    """密文大小 = 头 + 明文 + 每块 16 字节认证标签。"""
-    if plain_size <= 0:
-        return HEADER_SIZE
-    blocks = (plain_size + CHUNK_SIZE - 1) // CHUNK_SIZE
+    """密文大小 = 头 + 明文 + 每块 16 字节认证标签。
+
+    空文件也会写一个「0 长度明文」的标签，所以最小密文是 64 字节。这个标签
+    唯一的用处是拿头当 AAD 认证一遍——否则空文件的头谁都能改，而不被察觉。
+    """
+    blocks = max(1, (plain_size + CHUNK_SIZE - 1) // CHUNK_SIZE)
     return HEADER_SIZE + plain_size + TAG_SIZE * blocks
 
 
 def is_encrypted(path: str) -> bool:
-    """只读文件头判断。读不了就当明文，让上层按正常流程处理。"""
+    """判断这个文件是不是我们加密的。
+
+    不能只看魔数——文件名不变意味着云端是明文密文混合的，而一个恰好以
+    ``BSENC`` 开头的普通文件（二进制格式碰巧撞上，或者用户自己压了个包）
+    会被误判成密文，然后解密失败、下载失败。所以魔数之外还要求版本号和
+    分块大小都落在合法区间，长度至少够一个空文件的密文。
+    """
     try:
-        with open(path, "rb") as fh:
-            return fh.read(len(MAGIC)) == MAGIC
+        if os.path.getsize(path) < HEADER_SIZE + TAG_SIZE:
+            return False
     except OSError:
         return False
+    header = read_header(path)
+    if not header or header["version"] != VERSION:
+        return False
+    chunk = header["chunk_size"]
+    return 0 < chunk <= MAX_CHUNK
 
 
 def read_header(path: str) -> Optional[dict]:
@@ -129,6 +142,11 @@ def encrypt_file(src: str, dst: str, key: bytes) -> int:
     """把 src 加密写到 dst，返回密文字节数。
 
     阻塞调用（纯磁盘 + CPU），调用方用 ``asyncio.to_thread`` 包起来。
+
+    按 ``plain_size`` 精确读，不用「读到 EOF 为止」：实时同步可能正好在这
+    几秒里往源文件追加内容，多读的部分会被加密进密文，但头里记的还是旧
+    长度，解密时就只解前 ``plain_size`` 字节、后面的块被静默丢弃——不报错、
+    也没人发现。宁可这里报错重试。
     """
     plain_size = os.path.getsize(src)
     prefix = secrets.token_bytes(8)
@@ -137,18 +155,29 @@ def encrypt_file(src: str, dst: str, key: bytes) -> int:
     aead = AESGCM(key)
     written = HEADER_SIZE
     index = 0
+    remaining = plain_size
     with open(src, "rb") as fin, open(dst, "wb") as fout:
         fout.write(header)
-        while True:
-            data = fin.read(CHUNK_SIZE)
-            if not data:
-                break
+        while remaining > 0:
+            want = min(CHUNK_SIZE, remaining)
+            data = fin.read(want)
+            if len(data) != want:
+                raise CryptoError("源文件在加密过程中被截断，请等它写完再同步")
             # IV = 文件级随机前缀 + 块序号，所以每块不用单独存 nonce，
             # 同一文件内也不会重复（同密钥下 IV 复用会直接毁掉 GCM）。
             blob = aead.encrypt(prefix + index.to_bytes(4, "big"), data, header)
             fout.write(blob)
             written += len(blob)
             index += 1
+            remaining -= len(data)
+        if plain_size == 0:
+            # 空也要一个标签，把头绑上去（否则空文件的头完全不受保护）
+            blob = aead.encrypt(prefix + (0).to_bytes(4, "big"), b"", header)
+            fout.write(blob)
+            written += len(blob)
+    expected = encrypted_size(plain_size)
+    if written != expected:
+        raise CryptoError(f"密文长度异常（{written} != {expected}），源文件在加密时被改过")
     return written
 
 
@@ -167,10 +196,11 @@ def decrypt_file(src: str, dst: str, key: bytes) -> int:
     raw = header["raw"]
     aead = AESGCM(key)
     done = 0
-    index = 0
     with open(src, "rb") as fin, open(dst, "wb") as fout:
         fin.seek(HEADER_SIZE)
-        while done < plain_size:
+        # 空文件这里也要走一遍：blocks 至少为 1，take 为 0，只校验那个标签。
+        blocks = max(1, (plain_size + chunk - 1) // chunk)
+        for index in range(blocks):
             take = min(chunk, plain_size - done)
             blob = fin.read(take + TAG_SIZE)
             if len(blob) != take + TAG_SIZE:
@@ -181,7 +211,9 @@ def decrypt_file(src: str, dst: str, key: bytes) -> int:
             except InvalidTag:
                 raise DecryptError("解密校验失败：密钥不对，或者文件被改过")
             done += take
-            index += 1
+        # 头里写的长度之外的字节一律不认：追加数据不该被无声忽略。
+        if fin.read(1):
+            raise DecryptError("密文尾部有多余数据，文件可能被篡改")
     return plain_size
 
 
