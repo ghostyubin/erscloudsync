@@ -3061,3 +3061,20 @@ details[open] summary::before { transform: rotate(90deg); }
   color: #534AB7;
   vertical-align: middle;
 }
+
+/* ============================================================
+   离线解密
+   ============================================================ */
+.decrypt-error-row {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border-light);
+  word-break: break-all;
+}
+
+.decrypt-error-row:last-child {
+  border-bottom: none;
+}

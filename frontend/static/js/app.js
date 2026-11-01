@@ -13,6 +13,9 @@ const App = {
     browserPath: '/',
     browserRoot: 'sync',
     browserSelection: '/',
+    browserTarget: null,   // 目录浏览器这次把结果写给哪个输入框
+    decryptJob: null,      // 当前（或最近一个）离线解密任务
+    decryptTimer: null,    // 解密进度轮询定时器
     poll115Timer: null,
     progressTimer: null,
     _prevTransfers: {},  // {transfer_id: {transferred, time}} for per-file speed
@@ -78,6 +81,7 @@ const App = {
         if (view === 'dashboard') this.loadDashboard();
         if (view === 'cloud-files') this.loadCloudFilesView();
         if (view === 'downloads') this.loadDownloads();
+        if (view === 'decrypt') this.loadDecryptView();
         if (view === 'tasks') this.loadTasks();
         if (view === 'logs') this.loadLogs();
         if (view === 'settings') this.loadSettingsView();
@@ -1222,8 +1226,9 @@ const App = {
     },
 
     // ---- Directory Browser ----
-    async browseLocalDir() {
+    async browseLocalDir(target) {
         this.browserMode = 'local';
+        this.browserTarget = target || 'task-local-path';
         this.browserPath = '/';
         this.browserRoot = 'sync';
         this.browserSelection = '/';
@@ -1346,13 +1351,227 @@ const App = {
     },
 
     confirmBrowserSelection() {
+        // 目录浏览器的选中有多个去处：任务表单的本地/远程目录，或者解密页的
+        // 源目录/输出目录。browserTarget 记录这一次要给谁。
+        const targetId = this.browserTarget || 'task-local-path';
         if (this.browserMode === 'local') {
             const prefix = this.browserRoot === 'downloads' ? '/downloads' : '/sync';
-            document.getElementById('task-local-path').value = prefix + this.browserSelection;
+            const field = document.getElementById(targetId);
+            if (field) field.value = prefix + this.browserSelection;
+            if (targetId === 'decrypt-src') this.onDecryptSrcPicked();
         } else {
             document.getElementById('task-remote-path').value = this.browserSelection || '/';
         }
+        this.browserTarget = null;
         this.closeModal('modal-browser');
+    },
+
+    // ---- 离线解密 ----
+    // 这一页不碰同步任务、不碰本机的加密设置：密钥来自每个文件头里的钥匙牌，
+    // 所以在一台从没设置过密码的机器上，只要挂载了目录 + 知道密码就能解。
+
+    _fmtSize(n) {
+        const v = Number(n) || 0;
+        if (v < 1024) return `${v} B`;
+        const units = ['KB', 'MB', 'GB', 'TB'];
+        let x = v / 1024, i = 0;
+        while (x >= 1024 && i < units.length - 1) { x /= 1024; i += 1; }
+        return `${x.toFixed(x >= 10 ? 0 : 1)} ${units[i]}`;
+    },
+
+    async loadDecryptView() {
+        // 把正在跑的（或者刚跑完的）那个任务接回来：刷新页面、切走再切回来
+        // 都不该把进度弄丢。
+        try {
+            const r = await this.api('GET', '/api/decrypt/jobs');
+            const jobs = (r && r.jobs) || [];
+            if (jobs.length) {
+                this.decryptJob = jobs[0];
+                this.renderDecryptJob();
+                if (['queued', 'running'].includes(jobs[0].status)) this.startDecryptPoll();
+            }
+        } catch (e) {
+            // 后端还没升上来时不该让整个视图空白
+        }
+    },
+
+    async browseDecryptDir(which) {
+        const id = which === 'src' ? 'decrypt-src' : 'decrypt-dst';
+        const field = document.getElementById(id);
+        const current = (field.value || '').trim();
+        this.browserMode = 'local';
+        this.browserTarget = id;
+        // 从当前值猜根：/downloads 开头就是下载目录，否则按用途给个默认
+        this.browserRoot = current.startsWith('/downloads')
+            ? 'downloads'
+            : (current.startsWith('/sync') ? 'sync' : (which === 'dst' ? 'downloads' : 'sync'));
+        const rel = current.replace(/^\/downloads/, '').replace(/^\/sync/, '');
+        this.browserPath = rel || '/';
+        this.browserSelection = this.browserPath;
+        document.getElementById('browser-title').textContent =
+            which === 'src' ? '选择要解密的目录' : '选择解密输出目录';
+        document.getElementById('browser-root-switcher').style.display = 'flex';
+        this.updateBrowserRootButtons();
+        await this.loadBrowserItems();
+        this.openModal('modal-browser');
+    },
+
+    // 选好源目录后顺手给个输出目录建议（用户自己填过就不动）
+    onDecryptSrcPicked() {
+        const src = (document.getElementById('decrypt-src').value || '').trim();
+        const dstEl = document.getElementById('decrypt-dst');
+        if (!src || (dstEl.value || '').trim()) return;
+        const base = src.split('/').filter(Boolean).pop() || 'decrypt';
+        const norm = src.replace(/\/+$/, '');
+        const picks = [`/downloads/${base}-明文`, `/sync/${base}-明文`];
+        dstEl.value = picks.find(p => p !== norm && !p.startsWith(norm + '/')) || picks[0];
+    },
+
+    async scanDecrypt() {
+        const src = (document.getElementById('decrypt-src').value || '').trim();
+        const out = document.getElementById('decrypt-scan-result');
+        if (!src) { this.toast('请先选择要解密的目录', 'warning'); return; }
+        out.textContent = '扫描中…';
+        try {
+            const r = await this.api('POST', '/api/decrypt/scan', { path: src });
+            if (!r.encrypted) {
+                out.textContent = '这个目录里没有加密文件。';
+                return;
+            }
+            let txt = `共 ${r.encrypted} 个密文（${this._fmtSize(r.bytes)}）`;
+            if (r.plain) txt += `，另有 ${r.plain} 个未加密文件`;
+            if (r.with_keyblock < r.encrypted) {
+                txt += `；其中 ${r.encrypted - r.with_keyblock} 个文件头里没有钥匙牌，`
+                     + `只能用任务私钥文件解，密码解不了`;
+            }
+            out.textContent = txt + '。';
+        } catch (e) {
+            out.textContent = '';
+            this.toast(e.message || '扫描失败', 'error');
+        }
+    },
+
+    async startDecrypt() {
+        const src = (document.getElementById('decrypt-src').value || '').trim();
+        const dst = (document.getElementById('decrypt-dst').value || '').trim();
+        const pw = document.getElementById('decrypt-password').value;
+        if (!src || !dst) { this.toast('请选择要解密的目录和输出目录', 'warning'); return; }
+        if (!pw) { this.toast('请输入加密密码', 'warning'); return; }
+        const btn = document.getElementById('decrypt-start-btn');
+        btn.disabled = true;
+        try {
+            const job = await this.api('POST', '/api/decrypt/jobs', {
+                src, dst, password: pw,
+                copy_plain: document.getElementById('decrypt-copy-plain').checked,
+                overwrite: document.getElementById('decrypt-overwrite').checked,
+            });
+            // 密码用完就清掉，别留在输入框里被后来的人看到
+            document.getElementById('decrypt-password').value = '';
+            this.decryptJob = job;
+            this.renderDecryptJob();
+            this.startDecryptPoll();
+        } catch (e) {
+            this.toast(e.message || '启动解密失败', 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    },
+
+    startDecryptPoll() {
+        if (this.decryptTimer) return;
+        this.decryptTimer = setInterval(() => this.pollDecrypt(), 1000);
+    },
+
+    stopDecryptPoll() {
+        if (this.decryptTimer) {
+            clearInterval(this.decryptTimer);
+            this.decryptTimer = null;
+        }
+    },
+
+    async pollDecrypt() {
+        if (!this.decryptJob) { this.stopDecryptPoll(); return; }
+        try {
+            const job = await this.api('GET', `/api/decrypt/jobs/${this.decryptJob.id}`);
+            this.decryptJob = job;
+            this.renderDecryptJob();
+            if (!['queued', 'running'].includes(job.status)) {
+                this.stopDecryptPoll();
+                const ok = job.status === 'done' && !job.failed;
+                this.toast(job.message || '解密结束', ok ? 'success' : 'warning');
+            }
+        } catch (e) {
+            this.stopDecryptPoll();
+        }
+    },
+
+    renderDecryptJob() {
+        const job = this.decryptJob;
+        if (!job) return;
+        const section = document.getElementById('decrypt-progress-section');
+        if (!section) return;
+        section.style.display = '';
+
+        const running = ['queued', 'running'].includes(job.status);
+        const bar = document.getElementById('decrypt-bar');
+        bar.style.width = `${job.percent || 0}%`;
+        bar.className = 'progress-fill';
+        if (job.status === 'done') bar.style.background = 'var(--color-success)';
+        else if (job.status === 'failed') bar.style.background = 'var(--color-error, #ef4444)';
+        else if (job.status === 'cancelled') bar.style.background = 'var(--text-secondary)';
+        else { bar.style.background = ''; bar.className = 'progress-fill progress-fill-download'; }
+
+        const names = { queued: '排队中', running: '解密中', done: '已完成',
+                        failed: '失败', cancelled: '已取消' };
+        document.getElementById('decrypt-job-title').textContent =
+            `解密进度 · ${names[job.status] || job.status}`;
+
+        const srcBase = (job.src || '').replace(/\/+$/, '').split('/').pop() || job.src;
+        let desc = `${srcBase} → ${job.dst}`;
+        if (job.current) desc = `${srcBase} → ${job.dst} · 正在处理 ${job.current}`;
+        else if (job.message) desc = `${srcBase} → ${job.dst} · ${job.message}`;
+        document.getElementById('decrypt-job-desc').textContent = desc;
+
+        const parts = [
+            `${job.processed || 0}/${job.total || 0}`,
+            `${job.decrypted || 0} 个解密`,
+        ];
+        if (job.copied) parts.push(`${job.copied} 个复制`);
+        if (job.skipped) parts.push(`${job.skipped} 个跳过`);
+        if (job.failed) parts.push(`${job.failed} 个失败`);
+        if (job.bytes_out) parts.push(this._fmtSize(job.bytes_out));
+        if (job.elapsed) parts.push(`用时 ${job.elapsed}s`);
+        document.getElementById('decrypt-job-stats').textContent = parts.join(' · ');
+
+        const errBox = document.getElementById('decrypt-job-errors');
+        const errs = job.errors || [];
+        if (!errs.length) {
+            errBox.innerHTML = '';
+        } else {
+            const rows = errs.slice(0, 8).map(e =>
+                `<div class="decrypt-error-row">${this._esc(e.path)} — ${this._esc(e.error)}</div>`
+            ).join('');
+            errBox.innerHTML = rows
+                + (errs.length > 8 ? `<div class="decrypt-error-row">…另有 ${errs.length - 8} 个失败</div>` : '');
+        }
+
+        document.getElementById('decrypt-cancel-btn').style.display = running ? '' : 'none';
+    },
+
+    async cancelDecrypt() {
+        if (!this.decryptJob) return;
+        try {
+            await this.api('POST', `/api/decrypt/jobs/${this.decryptJob.id}/cancel`);
+            this.toast('正在取消…', 'info');
+        } catch (e) {
+            this.toast(e.message || '取消失败', 'error');
+        }
+    },
+
+    _esc(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     },
 
     // ---- Settings / About ----

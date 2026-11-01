@@ -38,6 +38,10 @@
                 <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M16 17.01V10h-2v7.01h-3L15 21l4-3.99h-3zM9 3L5 6.99h3V14h2V6.99h3L9 3z"/><path fill="currentColor" d="M5 20h14v-2H5v2z"/></svg>
                 <span>下载任务</span>
             </li>
+            <li class="nav-item" data-view="decrypt">
+                <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12.65 10A5.99 5.99 0 0 0 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6a5.99 5.99 0 0 0 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>
+                <span>解密</span>
+            </li>
             <li class="nav-group-label">系统</li>
             <li class="nav-item" data-view="settings">
                 <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94 0 .31.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
@@ -449,6 +453,96 @@
                 <div id="downloads-list">
                     <div class="empty-state">暂无下载任务</div>
                 </div>
+            </div>
+        </div>
+
+        <!-- Decrypt View -->
+        <div id="view-decrypt" class="view">
+            <div class="page-topbar">
+                <h1 class="page-title">解密</h1>
+                <div class="topbar-actions">
+                    <button class="btn-refresh" title="刷新" onclick="app.loadDecryptView()">
+                        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                    </button>
+                </div>
+            </div>
+            <div class="content-area">
+                <section class="settings-section">
+                    <div class="settings-section-header">
+                        <div>
+                            <h2 class="settings-section-title">离线解密</h2>
+                            <p class="settings-section-desc">
+                                选一个本地目录、输入加密密码，把里面的密文按原路径还原到另一个目录。
+                                密钥藏在每个文件的头里，所以<strong>任何一台部署了本程序的机器都能解</strong>——
+                                不需要这里的同步任务，也不需要在这台机器上设置过加密密码。
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>要解密的目录</label>
+                        <div class="dir-browser">
+                            <input type="text" id="decrypt-src" class="input" placeholder="/sync/照片" readonly>
+                            <button class="btn btn-secondary btn-sm" onclick="app.browseDecryptDir('src')">浏览</button>
+                        </div>
+                        <p class="settings-field-desc" style="margin-top:6px;">
+                            放密文的那一层，子目录会一起递归处理。
+                        </p>
+                    </div>
+
+                    <div class="form-group">
+                        <label>解密输出目录</label>
+                        <div class="dir-browser">
+                            <input type="text" id="decrypt-dst" class="input" placeholder="/downloads/照片-明文" readonly>
+                            <button class="btn btn-secondary btn-sm" onclick="app.browseDecryptDir('dst')">浏览</button>
+                        </div>
+                        <p class="settings-field-desc" style="margin-top:6px;">
+                            明文按原来的相对路径写进来，目录不存在会自动建。
+                            <strong>不能选源目录或它的子目录</strong>，免得解出来的明文混回待解密的目录树。
+                        </p>
+                    </div>
+
+                    <div class="form-group">
+                        <label>加密密码</label>
+                        <input type="password" id="decrypt-password" class="input"
+                               placeholder="加密那个文件时用的密码" autocomplete="off"
+                               onkeydown="if(event.key==='Enter')app.startDecrypt()">
+                        <p class="settings-field-desc" style="margin-top:6px;">
+                            只用来当场解开文件头里的钥匙牌，<strong>不存库、不写日志</strong>。
+                        </p>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="notify-check" style="font-weight:500;">
+                            <input type="checkbox" id="decrypt-copy-plain"> 未加密的文件也一并复制
+                        </label>
+                        <label class="notify-check" style="font-weight:500;margin-top:8px;">
+                            <input type="checkbox" id="decrypt-overwrite"> 覆盖输出目录里已存在的同名文件
+                        </label>
+                    </div>
+
+                    <div style="display:flex;gap:10px;align-items:center;">
+                        <button class="btn btn-secondary" onclick="app.scanDecrypt()" id="decrypt-scan-btn">先扫描看看</button>
+                        <button class="btn btn-primary" onclick="app.startDecrypt()" id="decrypt-start-btn">开始解密</button>
+                    </div>
+                    <div id="decrypt-scan-result" class="settings-field-desc" style="margin-top:10px;"></div>
+                </section>
+
+                <section class="settings-section" id="decrypt-progress-section" style="display:none;">
+                    <div class="settings-section-header">
+                        <div>
+                            <h2 class="settings-section-title" id="decrypt-job-title">解密进度</h2>
+                            <p class="settings-section-desc" id="decrypt-job-desc"></p>
+                        </div>
+                        <button class="btn btn-secondary btn-sm" id="decrypt-cancel-btn"
+                                onclick="app.cancelDecrypt()" style="display:none;">取消</button>
+                    </div>
+                    <div class="progress-bar" style="margin-top:2px;">
+                        <div class="progress-fill progress-fill-download" id="decrypt-bar" style="width:0%"></div>
+                    </div>
+                    <div id="decrypt-job-stats" class="settings-field-desc" style="margin-top:10px;"></div>
+                    <div id="decrypt-job-errors" style="margin-top:10px;"></div>
+                </section>
             </div>
         </div>
 

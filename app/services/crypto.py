@@ -199,6 +199,20 @@ def read_header(path: str) -> Optional[dict]:
             "block": block, "aad": aad, "data_offset": offset}
 
 
+def dek_from_block(block: dict, password: str) -> bytes:
+    """用密码解开文件头里的「钥匙牌」，拿到这个文件的数据密钥。
+
+    这是「只凭密码解密」的唯一支点：密码 → scrypt(salt) → KEK → 解开包裹的
+    DEK。整个过程不需要数据库、不需要本机配置，所以任何一台部署了本程序的
+    机器都能解别人的密文——这也是「解密」页面的工作原理。
+
+    失败一律抛 ``DecryptError``：密码不对和文件被改过在这里是同一件事，
+    AES-GCM 的认证标签分不出来，也不该分。
+    """
+    kek = _derive((password or "").strip(), block["salt"])
+    return _unwrap(kek, block["wrapped"], block["task_id"])
+
+
 def encrypt_file(src: str, dst: str, key: bytes, key_block: bytes = b"") -> int:
     """把 src 加密写到 dst，返回密文字节数。
 
