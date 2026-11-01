@@ -256,6 +256,55 @@ KEK 会用 `/config/enc.key`（权限 0600）里的密钥再封一份存进数�
 目录必须可写（只读挂载的目录没法做加密上传），并且要留出至少「单个最大文件」大小的
 剩余空间，否则加密会因磁盘满失败（原文件不受影响）。
 
+### 离线解密（不用跑 BauduSync 也能还原）
+
+云端存的只是密文，但这个格式**不依赖本程序**。仓库里的 `tools/bsenc-decrypt.py`
+是个单文件脚本，只需要 Python 3.9+ 和 `cryptography`，拷到任何机器都能用：
+
+```bash
+pip install cryptography        # 或 apt install python3-cryptography
+
+# 先看看密钥在不在、密码对不对（不写任何文件）
+python3 tools/bsenc-decrypt.py info --db /path/to/baudusync.db
+
+# 把整个目录解密到 ./plain，保留原子目录结构
+python3 tools/bsenc-decrypt.py decrypt --db /path/to/baudusync.db -o ./plain ~/cloud/照片
+
+# 原地解密，用明文覆盖密文（不可撤销，要 -y 或交互确认）
+python3 tools/bsenc-decrypt.py decrypt --db /path/to/baudusync.db --in-place ~/cloud/照片
+
+# 只校验完整性，不产出文件
+python3 tools/bsenc-decrypt.py decrypt --db /path/to/baudusync.db --verify-only ~/cloud
+
+# 只有导出的密钥包
+python3 tools/bsenc-decrypt.py decrypt --keys baudusync-keys-20261101.json -o ./plain ~/cloud
+```
+
+容器里也带着这个脚本，可以不给 NAS 装任何东西直接跑：
+
+```bash
+docker exec baudusync python /app/tools/bsenc-decrypt.py \
+    info --db /config/baudusync.db --password '你的密码'
+```
+
+**光有密码和密文是解不开的**，这一点必须记住。密码只能推出 KEK，真正加密每个文件
+的是**随机的任务密钥（DEK）**，它只以「被 KEK 包裹」的形式存在数据库里。所以离线解密
+需要三样东西之一：
+
+| 密钥来源 | 命令参数 | 什么时候用 |
+|---|---|---|
+| BauduSync 的数据库 | `--db baudusync.db` | NAS 还在，或整机备份里有 `.db` |
+| 界面导出的密钥包 | `--keys keys.json` | 只留了一份文件备份，或想把解密能力单独保管 |
+| `enc.key` 密钥文件 | 默认取数据库同目录的 `enc.key` | 有库也有 keyfile 时免密码 |
+
+「全局设置 → 客户端加密 → 导出解密密钥」会下载一个 `baudusync-keys-*.json`
+（**要重新输一次密码确认**）。它和密码一起，就是完整的灾难恢复材料——建议和
+`enc.key`、数据库备份分开放。
+
+脚本的行为和本体保持一致：靠文件头判断是不是密文，不是就跳过（`--copy-plain`
+可以把明文也一并复制，用于还原整个混合目录）；每块都验 GCM 标签，改过一位就报
+「认证失败」且不落地任何半成品；一个文件失败不影响同批其它文件，退出码非 0。
+
 ### 卷挂载说明
 
 | 容器路径 | 用途 | 持久化 |
@@ -462,6 +511,9 @@ compose 的 `environment` 若写成 `- BAIDU_APP_KEY=`（值为空），变量�
   `/config/enc.key` 封了一份在库里，这个文件和解密程序在同一台机器上。密码本身
   的强度对"能读磁盘的人"没有作用——需要的是磁盘加密（LUKS 之类）。
 - **密码忘了没有找回途径**。没有后门、没有恢复码，忘了就是永久丢失。
+- **导出的密钥包 `baudusync-keys-*.json` 泄漏 + 密码泄漏 = 全部文件**。它是把
+  所有任务的解密权打包带走，所以导出要求重新输一次密码，也请别把它和密码放在
+  同一处、别扔进同一个网盘。
 - **密码在 HTTP 请求体里明文传输**。BauduSync 只监听 HTTP，在内网/USB 网段之外
   暴露端口时，请在前面挂一层 TLS 反代。
 
@@ -525,6 +577,8 @@ erscloudsync/
 │   └── static/
 │       ├── css/style.css
 │       └── js/app.js
+├── tools/
+│   └── bsenc-decrypt.py      # 离线解密工具（独立运行，不依赖本程序）
 ├── .github/workflows/
 │   └── docker-publish.yml    # CI/CD 自动构建
 ├── Dockerfile                # 多架构 Docker 构建

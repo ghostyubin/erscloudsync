@@ -338,6 +338,15 @@ async def crypto_unlock(req: CryptoPassword):
     return {**result, "state": await _crypto_payload()}
 
 
+@router.post("/crypto/export")
+async def crypto_export(req: CryptoPassword):
+    """导出离线解密密钥包（tools/bsenc-decrypt.py 用）。必须重输密码。"""
+    try:
+        return await crypto.keyring.export_bundle(req.password)
+    except crypto.CryptoError as exc:
+        raise HTTPException(400, str(exc))
+
+
 @router.post("/crypto/password")
 async def crypto_change_password(req: CryptoChange):
     try:

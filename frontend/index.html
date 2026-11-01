@@ -293,6 +293,11 @@
                                            placeholder="新密码，至少 8 位" autocomplete="new-password">
                                 </div>
                             </div>
+                            <div class="notify-item notify-item-wide" id="setting-crypto-export-row" style="display:none;">
+                                <span>导出解密密钥包（需再输一次密码）</span>
+                                <input type="password" id="setting-crypto-export-password" class="input"
+                                       placeholder="密码确认后下载 keys.json，用于离线解密" autocomplete="current-password">
+                            </div>
                         </div>
 
                         <div class="notify-actions">
@@ -304,6 +309,10 @@
                                     onclick="app.toggleCryptoChange()" style="display:none;">更改密码</button>
                             <button class="btn btn-primary settings-save" id="setting-crypto-change-confirm"
                                     onclick="app.changeCryptoPassword()" style="display:none;">确认更改</button>
+                            <button class="btn btn-secondary settings-save" id="setting-crypto-export-btn"
+                                    onclick="app.toggleCryptoExport()" style="display:none;">导出解密密钥</button>
+                            <button class="btn btn-primary settings-save" id="setting-crypto-export-confirm"
+                                    onclick="app.exportCryptoKeys()" style="display:none;">确认导出</button>
                             <span class="notify-result" id="setting-crypto-result"></span>
                         </div>
                     </div>

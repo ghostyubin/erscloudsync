@@ -44,6 +44,7 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from app import database as db
 from app.config import DATA_DIR
+from app.version import APP_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -358,6 +359,53 @@ class Keyring:
         self._deks.clear()
         await self._seal(kek)
         return {"ok": True, "message": "已解锁，之后重启会自动运行"}
+
+    async def export_bundle(self, password: str) -> dict:
+        """导出离线解密密钥包（给 tools/bsenc-decrypt.py 用）。
+
+        **光有密码和密文是解不开的**：密码只能推出 KEK，真正加密每个文件的
+        是随机的 DEK，它只以「被 KEK 包裹」的形式存在库里。所以要把 salt 和
+        包裹后的密钥一起带走，否则 NAS 一旦没了，密码也就废了。
+
+        必须重新输密码确认：这个文件等于把所有任务的解密权打包带走，不能让
+        一个开着页面的浏览器顺手导走。
+        """
+        salt = await db.db_get_setting(SALT_KEY, "")
+        if not salt:
+            raise CryptoError("还没有设置加密密码")
+        kek = await asyncio.to_thread(_derive, (password or "").strip(),
+                                      _unb64(salt))
+        verifier = await db.db_get_setting(VERIFIER_KEY, "")
+        if verifier:
+            try:
+                AESGCM(kek).decrypt(b"\x00" * 12, _unb64(verifier), None)
+            except InvalidTag:
+                raise CryptoError("密码不正确")
+
+        keys = []
+        for task in await db.db_list_tasks():
+            packed = (task.get("enc_wrapped") or "").strip()
+            if not packed:
+                continue
+            _unwrap(kek, packed, int(task["id"]))   # 解不开就别导出坏包
+            keys.append({"task_id": int(task["id"]),
+                         "task_name": task.get("name") or "",
+                         "wrapped": packed})
+        if not keys:
+            raise CryptoError("还没有任务生成过加密密钥，导出的密钥包会是空的")
+
+        return {
+            "format": "bsenc-keybundle",
+            "version": 1,
+            "app_version": APP_VERSION,
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "kdf": {"name": "scrypt", "n": SCRYPT_N, "r": SCRYPT_R,
+                    "p": SCRYPT_P, "length": KEY_SIZE, "salt": _b64(_unb64(salt))},
+            "verifier": verifier,
+            "keys": keys,
+            "note": "配合 tools/bsenc-decrypt.py 使用。里面是包裹后的任务密钥，"
+                    "仍需密码才能解开——但泄漏了它 + 密码就等于泄漏全部文件。",
+        }
 
     async def change_password(self, old: str, new: str) -> dict:
         async with self._lock:          # 别和正在生成密钥的同步撞上

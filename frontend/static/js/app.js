@@ -1374,6 +1374,7 @@ const App = {
         show('setting-crypto-unlock-row', initialized && !unlocked);
         show('setting-crypto-unlock-btn', initialized && !unlocked);
         show('setting-crypto-change-btn', initialized && unlocked);
+        show('setting-crypto-export-btn', initialized && unlocked);
 
         if (badge) {
             let text = '未设置', color = 'var(--text-secondary)';
@@ -1441,6 +1442,48 @@ const App = {
         if (row) row.style.display = open ? '' : 'none';
         if (confirmBtn) confirmBtn.style.display = open ? '' : 'none';
         this._cryptoResult('', true);
+    },
+
+    toggleCryptoExport() {
+        const row = document.getElementById('setting-crypto-export-row');
+        const btn = document.getElementById('setting-crypto-export-confirm');
+        const open = !row || row.style.display === 'none';
+        if (row) row.style.display = open ? '' : 'none';
+        if (btn) btn.style.display = open ? '' : 'none';
+        this._cryptoResult('', true);
+        if (open) {
+            const input = document.getElementById('setting-crypto-export-password');
+            if (input) input.focus();
+        }
+    },
+
+    /* 导出的这串东西 + 密码 = 全部文件的解密权，所以必须重输密码确认。 */
+    async exportCryptoKeys() {
+        const input = document.getElementById('setting-crypto-export-password');
+        const pw = ((input && input.value) || '').trim();
+        if (!pw) { this._cryptoResult('请输入密码', false); return; }
+        const btn = document.getElementById('setting-crypto-export-confirm');
+        if (btn) btn.disabled = true;
+        try {
+            const r = await this.api('POST', '/api/system/crypto/export', { password: pw });
+            if (input) input.value = '';
+            const blob = new Blob([JSON.stringify(r, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+            a.href = url;
+            a.download = `baudusync-keys-${stamp}.json`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 2000);
+            this.toggleCryptoExport();
+            this._cryptoResult(`已导出（${r.keys.length} 个任务的密钥），请连密码一起保管`, true);
+        } catch (e) {
+            this._cryptoResult(e.message, false);
+        } finally {
+            if (btn) btn.disabled = false;
+        }
     },
 
     async changeCryptoPassword() {

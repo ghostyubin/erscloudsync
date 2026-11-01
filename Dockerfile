@@ -28,6 +28,7 @@ RUN pip install --no-cache-dir -i "$PIP_INDEX_URL" -r requirements.txt
 ARG CACHE_BUST=1
 COPY app/ ./app/
 COPY frontend/ ./frontend/
+COPY tools/ ./tools/
 
 # Create directories
 RUN mkdir -p /config /sync /downloads
