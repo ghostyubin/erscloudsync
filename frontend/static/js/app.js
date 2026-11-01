@@ -1368,18 +1368,17 @@ const App = {
         this.cryptoReady = initialized && unlocked;
 
         const show = (id, on) => { const n = el(id); if (n) n.style.display = on ? '' : 'none'; };
-        // 没设置过密码 → 只给「设置密码」；设置过但锁住 → 只给「解锁」
+        // 没设置过密码 → 只给「设置密码」；设置过但自动解锁失败 → 只给「解锁」
         show('setting-crypto-setup-row', !initialized);
         show('setting-crypto-setup-btn', !initialized);
         show('setting-crypto-unlock-row', initialized && !unlocked);
         show('setting-crypto-unlock-btn', initialized && !unlocked);
-        show('setting-crypto-lock-btn', initialized && unlocked);
         show('setting-crypto-change-btn', initialized && unlocked);
 
         if (badge) {
             let text = '未设置', color = 'var(--text-secondary)';
             if (initialized && unlocked) { text = '已启用'; color = 'var(--color-success)'; }
-            else if (initialized) { text = '已锁定'; color = 'var(--color-warning)'; }
+            else if (initialized) { text = '待解锁'; color = 'var(--color-warning)'; }
             if (st.tasks) text += ` · ${st.tasks} 个任务`;
             badge.textContent = text;
             badge.style.color = color;
@@ -1465,17 +1464,6 @@ const App = {
             this._cryptoResult(e.message, false);
         } finally {
             if (btn) btn.disabled = false;
-        }
-    },
-
-    async lockCrypto() {
-        if (!confirm('锁定后加密任务会停下，直到你重新输入密码。要继续吗？')) return;
-        try {
-            const r = await this.api('POST', '/api/system/crypto/lock');
-            this._applyCryptoState(r.state);
-            this._cryptoResult(r.message, true);
-        } catch (e) {
-            this._cryptoResult(e.message, false);
         }
     },
 

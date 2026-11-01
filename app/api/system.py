@@ -338,11 +338,6 @@ async def crypto_unlock(req: CryptoPassword):
     return {**result, "state": await _crypto_payload()}
 
 
-@router.post("/crypto/lock")
-async def crypto_lock():
-    return {**await crypto.keyring.lock(), "state": await _crypto_payload()}
-
-
 @router.post("/crypto/password")
 async def crypto_change_password(req: CryptoChange):
     try:

@@ -1002,6 +1002,38 @@ async def db_set_setting(key: str, value: str):
         await db.commit()
 
 
+async def db_rewrap_crypto(salt_key: str, salt_b64: str,
+                           verifier_key: str, verifier_b64: str,
+                           wraps: list[tuple[int, str]]):
+    """换密码时一次性落库：新 salt、新验证块、所有任务重新包裹的密钥。
+
+    必须在**同一个事务**里写完。分开写的话，中途崩溃/断电会留下「新 salt
+    配上部分旧 wrapped」这种半新半旧的状态——旧密码推导出的 KEK 解不开新的，
+    新密码推导出的 KEK 解不开旧的，那部分任务的云端文件就永久打不开了。
+
+    两个 settings 的键名由调用方传进来，免得这里再抄一份常量和 crypto.py 漂移。
+    """
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            for key, value in ((salt_key, salt_b64), (verifier_key, verifier_b64)):
+                await db.execute(
+                    """INSERT INTO settings (key, value, updated_at)
+                       VALUES (?, ?, strftime('%s','now'))
+                       ON CONFLICT(key) DO UPDATE SET
+                         value=excluded.value, updated_at=strftime('%s','now')""",
+                    (key, value))
+            for task_id, packed in wraps:
+                await db.execute(
+                    """UPDATE tasks SET enc_wrapped = ?, enc_key_id = 1,
+                       updated_at = strftime('%s','now') WHERE id = ?""",
+                    (packed, task_id))
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+
 async def db_get_all_settings() -> dict:
     async with aiosqlite.connect(str(DB_PATH)) as db:
         db.row_factory = aiosqlite.Row

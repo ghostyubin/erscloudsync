@@ -13,15 +13,18 @@
   新文件同步上去。
 * **分块大小对齐百度分片（4MiB）**，密文分块边界和上传分块边界重合，以后想
   改成边加密边算 md5 时不用改文件格式。
-* **加密文件自带魔数头**，下载时可以只读前 5 字节判断要不要解密。因为文件名
-  不变，没法靠后缀区分明文和密文——「只加密新文件」意味着云端必然是混合的。
-* **密码忘了就永远打不开**。所以密码要经 Argon2id/scrypt 派生，并且提供
-  「导出恢复密钥」；数据库里只存 salt、验证块和被包裹的 KEK，明文密码不落库。
+* **加密文件自带魔数头**，下载时只读头就能判断要不要解密（魔数 + 版本 + 分块
+  大小都要合法）。因为文件名不变，没法靠后缀区分明文和密文——「只加密新文件」
+  意味着云端必然是混合的。
+* **密码忘了就永远打不开**，没有找回途径。所以密码要经 scrypt 派生（不是直接
+  当密钥用），数据库里只存 salt、验证块和被包裹的 KEK，明文密码不落库。
+* **改密码只重包裹 DEK**，不重传文件。salt / 验证块 / 所有任务的新包裹必须在
+  同一个事务里落地，否则崩溃会留下半新半旧、旧密码新密码都解不开的状态。
 
 密钥层级：``密码 → scrypt → KEK → 包裹 → 每任务 DEK → 加密文件块``。
-改密码只重包裹 DEK，不用重传任何文件。为了让 NAS 无人值守，KEK 另有一份用
-密钥文件（``/config/enc.key``，0600）包裹的副本存在库里——所以备份数据库时
-如果没带上这个文件，光有库是解不开的。
+为了让 NAS 无人值守，KEK 另有一份用密钥文件（``/config/enc.key``，0600）包裹的
+副本存在库里——所以备份数据库时如果没带上这个文件，光有库是解不开的；反过来，
+不想要自动解锁就把这个文件移走。
 """
 
 from __future__ import annotations
@@ -276,12 +279,19 @@ class Keyring:
             return {"initialized": False, "unlocked": False,
                     "keyfile": KEYFILE.exists(),
                     "message": "还没有设置加密密码"}
+        if not self._kek:
+            # 「有封存副本 + 有密钥文件」不等于「能解开」：换过机器、恢复过
+            # 数据库、或者改过密码导致两边对不上，都会让它们同时在却解不开。
+            # 真的试一次，别在界面上报假状态。
+            try:
+                await self.kek()
+            except CryptoError:
+                pass
         return {
             "initialized": True,
-            # 有密钥文件 + 库里的封存副本 = 进程重启后能自己解开
-            "unlocked": bool(self._kek) or bool(sealed and KEYFILE.exists()),
+            "unlocked": bool(self._kek),
             "keyfile": KEYFILE.exists(),
-            "message": "",
+            "message": "" if self._kek or not sealed else "需要输入密码解锁",
         }
 
     def _read_keyfile(self, create: bool = False) -> Optional[bytes]:
@@ -349,13 +359,6 @@ class Keyring:
         await self._seal(kek)
         return {"ok": True, "message": "已解锁，之后重启会自动运行"}
 
-    async def lock(self) -> dict:
-        """清掉库里的封存副本，强制下次同步要密码。"""
-        self._kek = None
-        self._deks.clear()
-        await db.db_set_setting(SEALED_KEY, "")
-        return {"ok": True, "message": "已锁定，重新开始同步前需要输入密码"}
-
     async def change_password(self, old: str, new: str) -> dict:
         async with self._lock:          # 别和正在生成密钥的同步撞上
             return await self._change_password(old, new)
@@ -376,8 +379,8 @@ class Keyring:
         except InvalidTag:
             return {"ok": False, "message": "原密码不正确"}
 
-        # 先把所有任务的 DEK 解出来，再换 salt 重包。中途出错会留下半新半旧的
-        # 密钥，所以顺序上「能解的全解完」再开始写。
+        # 先把所有任务的 DEK 解出来，再换 salt 重包。任何一把解不开都在
+        # 这里就失败，此时还没写库，改密码等于没发生——比写了一半强得多。
         unwrapped: list[tuple[int, bytes]] = []
         for task in await db.db_list_tasks():
             packed = (task.get("enc_wrapped") or "").strip()
@@ -387,11 +390,13 @@ class Keyring:
 
         new_salt = secrets.token_bytes(16)
         new_kek = await asyncio.to_thread(_derive, new, new_salt)
-        await db.db_set_setting(
-            VERIFIER_KEY, _b64(AESGCM(new_kek).encrypt(b"\x00" * 12, VERIFY_PLAIN, None)))
-        for task_id, dek in unwrapped:
-            await db.db_update_task(task_id, enc_wrapped=_wrap(new_kek, dek, task_id))
-        await db.db_set_setting(SALT_KEY, _b64(new_salt))
+        verifier = AESGCM(new_kek).encrypt(b"\x00" * 12, VERIFY_PLAIN, None)
+        # salt / 验证块 / 所有 wrapped 必须在同一个事务里落地，否则中途崩溃
+        # 会留下「新 salt + 部分旧 wrapped」，那部分任务就永久解不开了。
+        await db.db_rewrap_crypto(
+            SALT_KEY, _b64(new_salt),
+            VERIFIER_KEY, _b64(verifier),
+            [(task_id, _wrap(new_kek, dek, task_id)) for task_id, dek in unwrapped])
 
         self._kek = new_kek
         self._deks.clear()
@@ -405,7 +410,7 @@ class Keyring:
             return self._kek
         sealed = await db.db_get_setting(SEALED_KEY, "")
         if not sealed:
-            raise KeyLocked("加密已锁定，请先在「全局设置 → 客户端加密」输入密码解锁")
+            raise KeyLocked("还没有可用的自动解锁密钥，请先在「全局设置 → 客户端加密」输入密码")
         fk = self._read_keyfile()
         if not fk:
             raise KeyLocked(f"密钥文件 {KEYFILE.name} 不见了，请重新输入密码解锁")
