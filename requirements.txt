@@ -8,3 +8,4 @@ apscheduler==3.11.0
 watchdog==6.0.0
 httpx==0.28.1
 cryptography==44.0.0
+lz4==4.4.5

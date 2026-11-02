@@ -1,8 +1,13 @@
 """独立解密：给一个本地目录 + 密码，把里面的密文还原到另一个目录。
 
-对标 Synology 的 Cloud Sync Decryption Tool——**不依赖本机数据库**。密钥就
-藏在每个文件的头里（「钥匙牌」），所以任何一台部署了本程序的机器，输对密码
-就能解别的机器加密的文件。
+对标 Synology 的 Cloud Sync Decryption Tool——**不依赖本机数据库**。
+
+认两种密文：
+
+* ``BSENC``（本程序现在的格式）：密钥藏在每个文件头里（「钥匙牌」），所以
+  任何一台部署了本程序的机器，输对密码就能解别的机器加密的文件；
+* ``__CLOUDSYNC_ENC__``（群晖 Cloud Sync 格式）：早先上传到网盘的历史数据。
+  本程序已不再生成这种格式，但用户手里还有存量，所以保留解码。
 
 和同步引擎里的 ``settle_download`` 的分工：
 
@@ -23,6 +28,7 @@ from typing import Optional
 
 from app import config
 from app.services import crypto as ck
+from app.services import syno_crypto as sk
 
 logger = logging.getLogger(__name__)
 
@@ -80,15 +86,30 @@ def check_output(src: str, path: str) -> str:
     return full
 
 
+def detect_format(path: str) -> Optional[str]:
+    """这是谁的密文：``"bsenc"`` / ``"syno"`` / ``None``（明文）。
+
+    BSENC 先认：它的头部校验最严（魔数 + 版本 + 分块大小），几乎不会误判。
+    群晖格式只看 17 字节魔数，所以放在后面。
+    """
+    if ck.is_encrypted(path):
+        return "bsenc"
+    if sk.is_syno(path):
+        return "syno"
+    return None
+
+
 def scan(src: str) -> dict:
     """先数一遍，让用户在真跑之前看到规模，也能提前撞上「密码不对」。
 
     只统计不写盘，随便调。
     """
-    encrypted = plain = 0
+    total = encrypted = plain = 0
+    bsenc = syno = 0
     total_bytes = 0
-    keyed = 0          # 有多少密文带着钥匙牌（没带就只能靠私钥文件）
+    keyed = 0          # 有多少 BSENC 密文带着钥匙牌（没带就只能靠私钥文件）
     first_with_block: Optional[str] = None
+    first_syno: Optional[str] = None
     for dirpath, _dirs, files in os.walk(src):
         for name in files:
             if name.endswith(_IGNORE_SUFFIX):
@@ -98,40 +119,81 @@ def scan(src: str) -> dict:
                 size = os.path.getsize(full)
             except OSError:
                 continue
-            if not ck.is_encrypted(full):
+            total += 1
+            fmt = detect_format(full)
+            if fmt is None:
                 plain += 1
                 continue
             encrypted += 1
             total_bytes += size
+            if fmt == "syno":
+                syno += 1
+                if first_syno is None:
+                    first_syno = full
+                continue
+            bsenc += 1
             header = ck.read_header(full)
             if header and header.get("block"):
                 keyed += 1
                 if first_with_block is None:
                     first_with_block = full
-    return {"encrypted": encrypted, "plain": plain, "bytes": total_bytes,
-            "with_keyblock": keyed, "sample": first_with_block}
+    return {"total": total, "encrypted": encrypted, "plain": plain,
+            "bsenc": bsenc, "syno": syno, "bytes": total_bytes,
+            "with_keyblock": keyed,
+            "sample": first_with_block, "sample_syno": first_syno}
+
+
+def no_cipher_message(info: dict) -> str:
+    """扫完一个密文都没有时说什么。
+
+    单纯一句「没有加密文件」会让人以为功能坏了——最常见的情况恰恰是这个
+    目录里全是明文：加密只作用于云端，同步到本地的文件在落盘前就解密了，
+    所以 /sync 下面永远是明文。把这句话说清楚，比让他自己猜有用。
+    """
+    n = int(info.get("total") or 0)
+    if n == 0:
+        return "这个目录里没有文件，没有可解密的密文"
+    return (f"这个目录里的 {n} 个文件都是明文，没有可解密的密文。"
+            "加密只作用于云端：从云端同步到本地的文件会自动解密，"
+            "所以本地的同步目录里不会出现密文。"
+            "要解密，得先把云端那份密文（用网盘客户端、rclone 之类）"
+            "下载到 /sync 或 /downloads 下的某个目录，再来这里解")
 
 
 def verify_password(src: str, password: str,
                     info: Optional[dict] = None) -> None:
-    """拿扫描到的第一个带钥匙牌的文件验一下密码，错了立刻报。
+    """拿扫描到的第一个密文验一下密码，错了立刻报。
 
-    只解钥匙牌、不碰正文，代价是一次 scrypt（约 0.1 秒）。等跑到一半才报
-    「密码不对」是最难受的失败方式，所以在开始前就挡掉。
+    只解文件头里的密钥、不碰正文，代价极小（BSENC 一次 scrypt，群晖格式一次
+    MD5 迭代）。等跑到一半才报「密码不对」是最难受的失败方式，所以开始前挡掉。
     """
     if info is None:
         info = scan(src)
     if not info["encrypted"]:
-        raise DecryptJobError("这个目录里没有加密文件")
-    if not info["with_keyblock"]:
-        raise DecryptJobError(
-            "这些文件头里没有钥匙牌，只能靠任务私钥文件或密钥包解密，"
-            "不能用密码直接解（加密时把「文件头附带密钥」关掉了）")
-    header = ck.read_header(info["sample"])
-    try:
-        ck.dek_from_block(header["block"], password)
-    except ck.CryptoError as exc:
-        raise DecryptJobError(f"密码不正确，或文件已被改动（{exc}）") from exc
+        raise DecryptJobError(no_cipher_message(info))
+
+    if info.get("with_keyblock"):
+        header = ck.read_header(info["sample"])
+        try:
+            ck.dek_from_block(header["block"], password)
+        except ck.CryptoError as exc:
+            raise DecryptJobError(f"密码不正确，或文件已被改动（{exc}）") from exc
+        return
+
+    if info.get("syno"):
+        # 群晖格式的文件头里带 key1_hash，直接就能判密码
+        s_info = sk.read_info(info["sample_syno"])
+        if not s_info:
+            raise DecryptJobError("群晖格式的文件头解析失败，文件可能损坏")
+        try:
+            sk.check_password(s_info, password)
+        except sk.SynoDecryptError as exc:
+            raise DecryptJobError(f"密码不正确（{exc}）") from exc
+        return
+
+    raise DecryptJobError(
+        "这些文件头里没有钥匙牌，只能靠任务私钥文件或密钥包解密，"
+        "不能用密码直接解（加密时把「文件头附带密钥」关掉了）")
 
 
 @dataclass
@@ -234,7 +296,7 @@ async def start(src: str, dst: str, password: str, copy_plain: bool = False,
 
     info = await asyncio.to_thread(scan, src)
     if not info["encrypted"]:
-        raise DecryptJobError("这个目录里没有加密文件")
+        raise DecryptJobError(no_cipher_message(info))
     await asyncio.to_thread(verify_password, src, password, info)
 
     if _current:
@@ -330,7 +392,8 @@ async def _one(job: Job, full: str, rel: str, size: int,
                password: str, cache: dict) -> None:
     target = os.path.join(job.dst, rel)
 
-    if not await asyncio.to_thread(ck.is_encrypted, full):
+    fmt = await asyncio.to_thread(detect_format, full)
+    if fmt is None:
         if not job.copy_plain:
             job.skipped += 1
             return
@@ -347,26 +410,30 @@ async def _one(job: Job, full: str, rel: str, size: int,
         job.skipped += 1
         return
 
-    header = await asyncio.to_thread(ck.read_header, full)
-    if not header:
-        raise ck.DecryptError("文件头损坏")
-    block = header.get("block")
-    if not block:
-        raise ck.DecryptError(
-            "文件头里没有钥匙牌，只能用任务私钥文件解密")
-
-    ck_key = (block["task_id"], block["salt"], block["wrapped"])
-    dek = cache.get(ck_key)
-    if dek is None:
-        # scrypt 一次 32MB / 0.1 秒，同一任务的文件共用同一个钥匙牌，
-        # 所以整个目录通常只在这里花一次。
-        dek = await asyncio.to_thread(ck.dek_from_block, block, password)
-        cache[ck_key] = dek
-
     await asyncio.to_thread(_ensure_parent, target)
     tmp = target + ck.SUFFIX_PLAIN
     try:
-        written = await asyncio.to_thread(ck.decrypt_file, full, tmp, dek)
+        if fmt == "syno":
+            # 群晖格式每个文件自带随机会话密钥，被密码包在 enc_key1 里，
+            # 没有「整个目录共用一份」的说法，缓不上。
+            written = await asyncio.to_thread(
+                sk.decrypt_file, full, tmp, password, None)
+        else:
+            header = await asyncio.to_thread(ck.read_header, full)
+            if not header:
+                raise ck.DecryptError("文件头损坏")
+            block = header.get("block")
+            if not block:
+                raise ck.DecryptError(
+                    "文件头里没有钥匙牌，只能用任务私钥文件解密")
+            ck_key = (block["task_id"], block["salt"], block["wrapped"])
+            dek = cache.get(ck_key)
+            if dek is None:
+                # scrypt 一次 32MB / 0.1 秒，同一任务的文件共用同一个钥匙牌，
+                # 所以整个目录通常只在这里花一次。
+                dek = await asyncio.to_thread(ck.dek_from_block, block, password)
+                cache[ck_key] = dek
+            written = await asyncio.to_thread(ck.decrypt_file, full, tmp, dek)
         await asyncio.to_thread(os.replace, tmp, target)
     except Exception:
         try:

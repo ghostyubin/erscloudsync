@@ -1435,13 +1435,24 @@ const App = {
         try {
             const r = await this.api('POST', '/api/decrypt/scan', { path: src });
             if (!r.encrypted) {
-                out.textContent = '这个目录里没有加密文件。';
+                // 说清楚为什么没有——这里的文件本来就是明文，不是功能坏了
+                out.textContent = r.total
+                    ? `这个目录里的 ${r.total} 个文件都是明文，没有可解密的密文。`
+                      + '加密只作用于云端，同步到本地的文件已经自动解密，'
+                      + '要解密得先把云端那份密文下载到 /sync 或 /downloads 下。'
+                    : '这个目录里没有文件。';
                 return;
             }
             let txt = `共 ${r.encrypted} 个密文（${this._fmtSize(r.bytes)}）`;
+            if (r.syno && r.bsenc) {
+                txt += `，群晖格式 ${r.syno} 个 + BSENC ${r.bsenc} 个`;
+            } else if (r.syno) {
+                txt += '，都是群晖 Cloud Sync 格式';
+            }
             if (r.plain) txt += `，另有 ${r.plain} 个未加密文件`;
-            if (r.with_keyblock < r.encrypted) {
-                txt += `；其中 ${r.encrypted - r.with_keyblock} 个文件头里没有钥匙牌，`
+            const unkeyed = (r.bsenc || 0) - (r.with_keyblock || 0);
+            if (unkeyed > 0) {
+                txt += `；其中 ${unkeyed} 个文件头里没有钥匙牌，`
                      + `只能用任务私钥文件解，密码解不了`;
             }
             out.textContent = txt + '。';
