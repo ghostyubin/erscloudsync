@@ -1462,20 +1462,77 @@ const App = {
         }
     },
 
+    // 读界面上选的密钥文件。文件只在内存里过一遍，不上传也不落盘——
+    // 里面是解密权，留在服务器上没有任何好处。
+    async _readKeyfiles() {
+        const input = document.getElementById('decrypt-keyfiles');
+        const files = Array.from((input && input.files) || []);
+        const out = [];
+        for (const f of files) {
+            let data;
+            try {
+                data = JSON.parse(await f.text());
+            } catch (e) {
+                throw new Error(`密钥文件 ${f.name} 不是合法的 JSON`);
+            }
+            out.push(data);
+        }
+        return out;
+    },
+
+    async onDecryptKeysPicked() {
+        const info = document.getElementById('decrypt-keyfiles-info');
+        if (!info) return;
+        try {
+            const files = await this._readKeyfiles();
+            if (!files.length) { info.textContent = ''; return; }
+            const tasks = [];
+            let bundle = 0, unknown = 0;
+            files.forEach(d => {
+                if (d && d.format === 'bsenc-taskkey' && d.task_id) {
+                    tasks.push(Number(d.task_id));
+                } else if (d && d.format === 'bsenc-keybundle') {
+                    bundle += 1;
+                } else {
+                    unknown += 1;
+                }
+            });
+            const bits = [];
+            if (tasks.length) bits.push(`任务私钥 ${tasks.length} 把（任务 ${tasks.join('、')}）`);
+            if (bundle) bits.push(`密钥包 ${bundle} 份（仍需填密码）`);
+            if (unknown) bits.push(`${unknown} 个认不出来`);
+            info.textContent = `已选 ${files.length} 个文件：${bits.join('，')}。`;
+        } catch (e) {
+            info.textContent = e.message || '读不出密钥文件';
+        }
+    },
+
     async startDecrypt() {
         const src = (document.getElementById('decrypt-src').value || '').trim();
         const dst = (document.getElementById('decrypt-dst').value || '').trim();
         const pw = document.getElementById('decrypt-password').value;
         if (!src || !dst) { this.toast('请选择要解密的目录和输出目录', 'warning'); return; }
-        if (!pw) { this.toast('请输入加密密码', 'warning'); return; }
+        let keyfiles;
+        try {
+            keyfiles = await this._readKeyfiles();
+        } catch (e) {
+            this.toast(e.message, 'error');
+            return;
+        }
+        if (!pw && !keyfiles.length) {
+            this.toast('请输入加密密码，或者选上导出的密钥文件', 'warning');
+            return;
+        }
         const btn = document.getElementById('decrypt-start-btn');
         btn.disabled = true;
         try {
-            const job = await this.api('POST', '/api/decrypt/jobs', {
+            const payload = {
                 src, dst, password: pw,
                 copy_plain: document.getElementById('decrypt-copy-plain').checked,
                 overwrite: document.getElementById('decrypt-overwrite').checked,
-            });
+            };
+            if (keyfiles.length) payload.keyfiles = keyfiles;
+            const job = await this.api('POST', '/api/decrypt/jobs', payload);
             // 密码用完就清掉，别留在输入框里被后来的人看到
             document.getElementById('decrypt-password').value = '';
             this.decryptJob = job;
@@ -1550,6 +1607,7 @@ const App = {
         if (job.copied) parts.push(`${job.copied} 个复制`);
         if (job.skipped) parts.push(`${job.skipped} 个跳过`);
         if (job.failed) parts.push(`${job.failed} 个失败`);
+        if (job.keys) parts.push(`${job.keys} 把导入密钥`);
         if (job.bytes_out) parts.push(this._fmtSize(job.bytes_out));
         if (job.elapsed) parts.push(`用时 ${job.elapsed}s`);
         document.getElementById('decrypt-job-stats').textContent = parts.join(' · ');

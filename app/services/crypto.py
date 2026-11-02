@@ -294,6 +294,33 @@ def decrypt_file(src: str, dst: str, key: bytes) -> int:
     return plain_size
 
 
+def verify_key(src: str, key: bytes) -> bool:
+    """这把密钥能不能解开这个文件？只试第一块，不写盘。
+
+    解密页接受「导出的密钥文件」时用它做前置校验：对不上就当场报错，而不是
+    让用户等到跑完几十个文件才发现整批都失败（那种失败很难看出是密钥给错了
+    还是文件坏了）。
+
+    只认 BSENC。群晖格式没有「一把 DEK」的概念——它的钥匙是从密码推出来的，
+    不由这里校验。
+    """
+    header = read_header(src)
+    if not header:
+        return False
+    chunk = header["chunk_size"]
+    take = min(chunk, header["plain_size"])
+    try:
+        with open(src, "rb") as fin:
+            fin.seek(header["data_offset"])
+            blob = fin.read(take + TAG_SIZE)
+        # 空文件也有一个标签（take=0），所以这里不必特判。
+        AESGCM(key).decrypt(header["nonce_prefix"] + (0).to_bytes(4, "big"),
+                            blob, header["aad"])
+        return True
+    except (InvalidTag, OSError, ValueError):
+        return False
+
+
 # --------------------------------------------------------------------------
 # 密钥
 # --------------------------------------------------------------------------

@@ -1,11 +1,13 @@
 """独立解密的 HTTP 接口。
 
-把「选一个目录 + 输密码 + 解到另一个目录」这套动作暴露给界面，对应 Synology
+把「选一个目录 + 给凭据 + 解到另一个目录」这套动作暴露给界面，对应 Synology
 的 Cloud Sync Decryption Tool。它**和同步任务、数据库、加密设置都没有关系**：
-密钥来自每个文件头里的钥匙牌，所以在任何一台部署了本程序的机器上都能用。
+密钥来自每个文件头里的钥匙牌，或者用户在界面上传的密钥文件，所以在任何一台
+部署了本程序的机器上都能用。
 """
 import asyncio
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -24,7 +26,10 @@ class ScanRequest(BaseModel):
 class StartRequest(BaseModel):
     src: str
     dst: str
-    password: str
+    # 密码和密钥文件可以只给一个：任务私钥里是明文密钥，不用密码也能解；
+    # 密钥包里是仍被密码包着的密钥，得配密码。
+    password: str = ""
+    keyfiles: Optional[list[dict]] = None
     # 把没加密的文件也一并复制过去，用于还原一个明文密文混合的目录
     copy_plain: bool = False
     # 输出目录里已经有同名文件时是否覆盖；默认跳过，免得手滑覆盖别的东西
@@ -52,7 +57,8 @@ async def create_job(req: StartRequest):
     try:
         job_id = await dj.start(req.src, req.dst, req.password,
                                 copy_plain=req.copy_plain,
-                                overwrite=req.overwrite)
+                                overwrite=req.overwrite,
+                                keyfiles=req.keyfiles)
     except dj.DecryptJobError as exc:
         raise HTTPException(400, str(exc))
     return {"id": job_id, **dj.get_job(job_id)}

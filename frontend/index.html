@@ -460,9 +460,12 @@
                         <div>
                             <h2 class="settings-section-title">离线解密</h2>
                             <p class="settings-section-desc">
-                                选一个本地目录、输入加密密码，把里面的密文按原路径还原到另一个目录。
+                                选一个本地目录、给凭据（密码，或者导出的密钥文件），
+                                把里面的密文按原路径还原到另一个目录。
                                 密钥藏在每个文件的头里，所以<strong>任何一台部署了本程序的机器都能解</strong>——
                                 不需要这里的同步任务，也不需要在这台机器上设置过加密密码。
+                                密码忘了、或者文件头里没带钥匙牌的老文件，用「导出私钥」
+                                得到的 <code>*-key.json</code> 也能解。
                                 同时认群晖 Cloud Sync 格式（<code>__CLOUDSYNC_ENC__</code>）的老密文，
                                 即以前用群晖或本程序旧版本加密上传到网盘的那些。
                             </p>
@@ -496,12 +499,30 @@
                     </div>
 
                     <div class="form-group">
+                        <label>密钥文件（可选）</label>
+                        <input type="file" id="decrypt-keyfiles" class="input" multiple
+                               accept=".json,application/json"
+                               onchange="app.onDecryptKeysPicked()">
+                        <p class="settings-field-desc" style="margin-top:6px;">
+                            选任务里「重新导出本任务私钥」得到的
+                            <code>baudusync-task-N-key.json</code>，或者全局设置里
+                            「导出解密密钥包」得到的文件。可多选；只在本次解密时读进内存，
+                            <strong>不会保存到磁盘</strong>。
+                        </p>
+                        <div id="decrypt-keyfiles-info" class="settings-field-desc"
+                             style="margin-top:4px;"></div>
+                    </div>
+
+                    <div class="form-group">
                         <label>加密密码</label>
                         <input type="password" id="decrypt-password" class="input"
-                               placeholder="加密那个文件时用的密码" autocomplete="off"
+                               placeholder="加密那个文件时用的密码；有任务私钥文件时可留空"
+                               autocomplete="off"
                                onkeydown="if(event.key==='Enter')app.startDecrypt()">
                         <p class="settings-field-desc" style="margin-top:6px;">
-                            只用来当场解开文件头里的钥匙牌，<strong>不存库、不写日志</strong>。
+                            用来当场解开文件头里的钥匙牌，<strong>不存库、不写日志</strong>。
+                            上传的是<strong>密钥包</strong>时，里面的密钥还套着密码，仍需填写；
+                            上传的是<strong>任务私钥</strong>则可以不填。
                         </p>
                     </div>
 

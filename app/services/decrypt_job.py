@@ -1,4 +1,4 @@
-"""独立解密：给一个本地目录 + 密码，把里面的密文还原到另一个目录。
+"""独立解密：给一个本地目录 + 凭据，把里面的密文还原到另一个目录。
 
 对标 Synology 的 Cloud Sync Decryption Tool——**不依赖本机数据库**。
 
@@ -9,10 +9,17 @@
 * ``__CLOUDSYNC_ENC__``（群晖 Cloud Sync 格式）：早先上传到网盘的历史数据。
   本程序已不再生成这种格式，但用户手里还有存量，所以保留解码。
 
+凭据也认两种，可以单用也可以一起用：
+
+* **密码**——当场解开文件头里的钥匙牌；改过密码之后，老文件要用当时的密码；
+* **导出的密钥文件**——任务里的 ``baudusync-task-N-key.json`` 里是明文数据
+  密钥，**不需要密码**；全局设置里导出的 ``bsenc-keybundle`` 里是仍被密码
+  包着的密钥，得配密码。这是「密码忘了」和「文件头没钥匙牌」的出路。
+
 和同步引擎里的 ``settle_download`` 的分工：
 
 * 那边是自动化的、走数据库里的 DEK、针对单个中转文件；
-* 这里是手动的、走文件头里的钥匙牌、针对一整棵目录树。
+* 这里是手动的、走文件头钥匙牌或导入的密钥文件、针对一整棵目录树。
 
 两边的文件格式完全一样，只是密钥来源不同。
 """
@@ -100,9 +107,13 @@ def detect_format(path: str) -> Optional[str]:
 
 
 def scan(src: str) -> dict:
-    """先数一遍，让用户在真跑之前看到规模，也能提前撞上「密码不对」。
+    """先数一遍，让用户在真跑之前看到规模，也能提前撞上「凭据不对」。
 
     只统计不写盘，随便调。
+
+    ``samples``/``task_ids`` 是给「上传密钥文件」那条路用的：密钥是按任务
+    编号匹配的，得先知道这堆密文属于哪几个任务，才能在开跑前判定「你给的
+    密钥是不是这堆文件的」。
     """
     total = encrypted = plain = 0
     bsenc = syno = 0
@@ -110,6 +121,8 @@ def scan(src: str) -> dict:
     keyed = 0          # 有多少 BSENC 密文带着钥匙牌（没带就只能靠私钥文件）
     first_with_block: Optional[str] = None
     first_syno: Optional[str] = None
+    first_bsenc: Optional[str] = None
+    samples: dict[int, str] = {}      # 任务号 → 该任务的第一个密文
     for dirpath, _dirs, files in os.walk(src):
         for name in files:
             if name.endswith(_IGNORE_SUFFIX):
@@ -132,15 +145,23 @@ def scan(src: str) -> dict:
                     first_syno = full
                 continue
             bsenc += 1
+            if first_bsenc is None:
+                first_bsenc = full
             header = ck.read_header(full)
-            if header and header.get("block"):
+            if not header:
+                continue
+            block = header.get("block")
+            if block:
+                samples.setdefault(int(block["task_id"]), full)
                 keyed += 1
                 if first_with_block is None:
                     first_with_block = full
     return {"total": total, "encrypted": encrypted, "plain": plain,
             "bsenc": bsenc, "syno": syno, "bytes": total_bytes,
             "with_keyblock": keyed,
-            "sample": first_with_block, "sample_syno": first_syno}
+            "sample": first_with_block, "sample_syno": first_syno,
+            "first_bsenc": first_bsenc,
+            "task_ids": sorted(samples), "samples": samples}
 
 
 def no_cipher_message(info: dict) -> str:
@@ -160,17 +181,110 @@ def no_cipher_message(info: dict) -> str:
             "下载到 /sync 或 /downloads 下的某个目录，再来这里解")
 
 
-def verify_password(src: str, password: str,
-                    info: Optional[dict] = None) -> None:
-    """拿扫描到的第一个密文验一下密码，错了立刻报。
+KEYFILE_TASK = "bsenc-taskkey"
+KEYFILE_BUNDLE = "bsenc-keybundle"
 
-    只解文件头里的密钥、不碰正文，代价极小（BSENC 一次 scrypt，群晖格式一次
-    MD5 迭代）。等跑到一半才报「密码不对」是最难受的失败方式，所以开始前挡掉。
+
+def parse_keyfiles(items, password: str) -> dict[int, bytes]:
+    """把界面上传的密钥文件解析成 ``{任务号: 数据密钥}``。
+
+    认两种格式，都是本程序自己导出的：
+
+    * ``bsenc-taskkey``——任务详情里「重新导出本任务私钥」得到的
+      ``baudusync-task-N-key.json``。里面就是明文数据密钥，**不要密码**；
+    * ``bsenc-keybundle``——全局设置里「导出解密密钥包」得到的。里面是仍被
+      密码包着的密钥，**必须配密码**才能展开。
+
+    密钥包里个别密钥解不开就跳过，不让整份作废——「导出之后又改过密码」的
+    库就是这种情形。
+    """
+    out: dict[int, bytes] = {}
+    for idx, data in enumerate(items or [], 1):
+        if not isinstance(data, dict):
+            raise DecryptJobError(f"第 {idx} 个密钥文件不是 JSON 对象")
+        fmt = str(data.get("format") or "").strip()
+        if fmt == KEYFILE_TASK:
+            try:
+                task_id = int(data["task_id"])
+                dek = ck._unb64(str(data["dek"]))
+            except (KeyError, TypeError, ValueError, ck.CryptoError) as exc:
+                raise DecryptJobError(
+                    f"第 {idx} 个任务私钥文件内容不完整（{exc}）") from exc
+            if len(dek) != ck.KEY_SIZE:
+                raise DecryptJobError(
+                    f"第 {idx} 个任务私钥长度不对（{len(dek)} 字节），"
+                    f"文件可能被改过")
+            out[task_id] = dek
+        elif fmt == KEYFILE_BUNDLE:
+            if not (password or "").strip():
+                raise DecryptJobError(
+                    "密钥包里的密钥还套着密码，请一并填写当时的加密密码；"
+                    "想完全不输密码，改用任务里导出的 baudusync-task-N-key.json")
+            salt_b64 = str((data.get("kdf") or {}).get("salt") or "")
+            try:
+                kek = ck._derive(password, ck._unb64(salt_b64))
+            except ck.CryptoError as exc:
+                raise DecryptJobError(f"第 {idx} 个密钥包的参数损坏") from exc
+            for entry in data.get("keys") or []:
+                try:
+                    task_id = int(entry["task_id"])
+                    out[task_id] = ck._unwrap(kek, str(entry["wrapped"]), task_id)
+                except Exception:      # noqa: BLE001 - 单把解不开不影响别的
+                    continue
+        else:
+            raise DecryptJobError(
+                f"第 {idx} 个文件不是本程序导出的密钥文件"
+                f"（format={fmt or '空'}）。要的是 baudusync-task-N-key.json，"
+                f"或者设置里「导出解密密钥包」得到的文件")
+    return out
+
+
+def verify_credentials(src: str, password: str, info: Optional[dict] = None,
+                       deks: Optional[dict] = None) -> None:
+    """开跑之前先验一次凭据，错了立刻报。
+
+    手里有密钥文件时它优先：按密文里的任务号挑一把，真去解第一块。这一步
+    才是关键——密钥文件的 ``task_id`` 对得上不代表密钥对，而「跑到一半才
+    发现全批失败」是最难受的失败方式。
+
+    没有可用密钥时退回密码路径：BSENC 解一把钥匙牌（一次 scrypt），群晖
+    格式核对文件头里的 ``key1_hash``（一次 MD5 迭代）。
     """
     if info is None:
         info = scan(src)
     if not info["encrypted"]:
         raise DecryptJobError(no_cipher_message(info))
+
+    deks = dict(deks or {})
+    probe = info.get("sample") or info.get("first_bsenc") or ""
+    have = [t for t in (info.get("task_ids") or []) if t in deks]
+    if have:
+        task_id = have[0]
+        path = (info.get("samples") or {}).get(task_id) or probe
+        if path and not ck.verify_key(path, deks[task_id]):
+            raise DecryptJobError(
+                f"这份密钥打不开任务 {task_id} 的密文：密钥文件属于别的任务，"
+                f"或者文件被改过")
+        return
+
+    if deks and probe and any(ck.verify_key(probe, dek) for dek in deks.values()):
+        # 老格式密文的头里既没有任务号也没有钥匙牌，没法按编号匹配，
+        # 只能拿手上的密钥挨个试第一块。通常只有一两把，代价可忽略。
+        return
+
+    if deks and not (password or "").strip():
+        if not info.get("bsenc"):
+            raise DecryptJobError(
+                "这批是群晖 Cloud Sync 格式的密文，密钥文件帮不上忙"
+                "（它的钥匙是从密码现推的），请填写当时的密码")
+        if info.get("task_ids"):
+            raise DecryptJobError(
+                f"这些密文属于任务 {'、'.join(str(t) for t in info['task_ids'])}，"
+                f"和你给的密钥文件对不上。请换成对应任务导出的私钥，"
+                f"或者填密码直接解")
+        raise DecryptJobError(
+            "给的密钥文件打不开这批密文，而且没填密码。请确认这个密钥文件是"
+            "加密这些文件的那台机器导出的")
 
     if info.get("with_keyblock"):
         header = ck.read_header(info["sample"])
@@ -196,6 +310,10 @@ def verify_password(src: str, password: str,
         "文件或密钥包解密，不能用密码直接解")
 
 
+# 兼容旧名字：外部（含测试）还有按名字调用的地方
+verify_password = verify_credentials
+
+
 @dataclass
 class Job:
     id: str
@@ -203,6 +321,7 @@ class Job:
     dst: str
     copy_plain: bool = False
     overwrite: bool = False
+    key_count: int = 0              # 这次用了几把导出的密钥（0=只靠密码）
     status: str = "queued"          # queued | running | done | failed | cancelled
     total: int = 0
     processed: int = 0
@@ -230,6 +349,7 @@ class Job:
         return {
             "id": self.id, "src": self.src, "dst": self.dst,
             "copy_plain": self.copy_plain, "overwrite": self.overwrite,
+            "keys": self.key_count,
             "status": self.status, "total": self.total,
             "processed": self.processed, "percent": pct,
             "decrypted": self.decrypted, "copied": self.copied,
@@ -282,8 +402,11 @@ async def cancel_job(job_id: str) -> bool:
 
 
 async def start(src: str, dst: str, password: str, copy_plain: bool = False,
-                overwrite: bool = False) -> str:
+                overwrite: bool = False, keyfiles=None) -> str:
     """校验、扫描、起后台任务，立刻返回 job id。
+
+    ``keyfiles`` 是界面上传的密钥文件内容（已经解析好的 JSON 列表），可以只
+    给密钥不给密码——任务私钥里就是明文密钥，不用密码也能解。
 
     校验和扫描（可能要走一整棵树、还要跑一次 scrypt）都丢到线程里，别把
     HTTP 事件循环卡住——其它请求会一起变慢。
@@ -291,13 +414,14 @@ async def start(src: str, dst: str, password: str, copy_plain: bool = False,
     global _current
     src = check_source(src)
     dst = check_output(src, dst)
-    if not (password or "").strip():
-        raise DecryptJobError("请输入加密密码")
+    if not (password or "").strip() and not keyfiles:
+        raise DecryptJobError("请输入加密密码，或者上传导出的密钥文件")
 
+    deks = await asyncio.to_thread(parse_keyfiles, keyfiles or [], password)
     info = await asyncio.to_thread(scan, src)
     if not info["encrypted"]:
         raise DecryptJobError(no_cipher_message(info))
-    await asyncio.to_thread(verify_password, src, password, info)
+    await asyncio.to_thread(verify_credentials, src, password, info, deks)
 
     if _current:
         running = _JOBS.get(_current)
@@ -306,12 +430,13 @@ async def start(src: str, dst: str, password: str, copy_plain: bool = False,
                 f"已经有一个解密任务在跑（{os.path.basename(running.src)}），等它结束再开始")
 
     job = Job(id=uuid.uuid4().hex[:12], src=src, dst=dst,
-              copy_plain=bool(copy_plain), overwrite=bool(overwrite))
+              copy_plain=bool(copy_plain), overwrite=bool(overwrite),
+              key_count=len(deks))
     _JOBS[job.id] = job
     _current = job.id
     _prune()
-    _TASKS[job.id] = asyncio.create_task(_run(job, password))
-    logger.info("开始解密：%s → %s", src, dst)
+    _TASKS[job.id] = asyncio.create_task(_run(job, password, deks))
+    logger.info("开始解密：%s → %s（密钥 %d 把）", src, dst, len(deks))
     return job.id
 
 
@@ -342,11 +467,12 @@ def _collect(src: str) -> list[tuple[str, str, int]]:
     return out
 
 
-async def _run(job: Job, password: str) -> None:
+async def _run(job: Job, password: str, deks: Optional[dict] = None) -> None:
     global _current
     job.status = "running"
     job.started_at = time.time()
     cache: dict[tuple, bytes] = {}
+    deks = deks or {}
     try:
         files = await asyncio.to_thread(_collect, job.src)
         job.total = len(files)
@@ -355,7 +481,7 @@ async def _run(job: Job, password: str) -> None:
                 break
             job.current = rel
             try:
-                await _one(job, full, rel, size, password, cache)
+                await _one(job, full, rel, size, password, deks, cache)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:          # noqa: BLE001 - 单个文件失败不中断整批
@@ -389,7 +515,7 @@ async def _run(job: Job, password: str) -> None:
 
 
 async def _one(job: Job, full: str, rel: str, size: int,
-               password: str, cache: dict) -> None:
+               password: str, deks: dict, cache: dict) -> None:
     target = os.path.join(job.dst, rel)
 
     fmt = await asyncio.to_thread(detect_format, full)
@@ -423,16 +549,31 @@ async def _one(job: Job, full: str, rel: str, size: int,
             if not header:
                 raise ck.DecryptError("文件头损坏")
             block = header.get("block")
-            if not block:
-                raise ck.DecryptError(
-                    "文件头里没有钥匙牌，只能用任务私钥文件解密")
-            ck_key = (block["task_id"], block["salt"], block["wrapped"])
-            dek = cache.get(ck_key)
+            task_id = int(block["task_id"]) if block else 0
+            # 手上有这个任务的密钥就直接用：省掉每个文件一次 scrypt，
+            # 也是「文件头没钥匙牌」和「密码忘了」时唯一能走的路。
+            dek = deks.get(task_id) if task_id else None
+            if dek is None and not task_id and deks:
+                # 老格式的密文头里没有任务号，没法按编号挑密钥，只能拿手上的
+                # 密钥挨个试第一块。正常情况下第一把就中。
+                for candidate in deks.values():
+                    if await asyncio.to_thread(ck.verify_key, full, candidate):
+                        dek = candidate
+                        break
             if dek is None:
-                # scrypt 一次 32MB / 0.1 秒，同一任务的文件共用同一个钥匙牌，
-                # 所以整个目录通常只在这里花一次。
-                dek = await asyncio.to_thread(ck.dek_from_block, block, password)
-                cache[ck_key] = dek
+                if not block:
+                    raise ck.DecryptError(
+                        "文件头里没有钥匙牌，手上的密钥也解不开它——"
+                        "请换成加密这台机器导出私钥（baudusync-task-N-key.json）")
+                if not (password or "").strip():
+                    raise ck.DecryptError(f"没有任务 {task_id} 的密钥文件，也没给密码")
+                ck_key = (task_id, block["salt"], block["wrapped"])
+                dek = cache.get(ck_key)
+                if dek is None:
+                    # scrypt 一次 32MB / 0.1 秒，同一任务的文件共用同一个钥匙牌，
+                    # 所以整个目录通常只在这里花一次。
+                    dek = await asyncio.to_thread(ck.dek_from_block, block, password)
+                    cache[ck_key] = dek
             written = await asyncio.to_thread(ck.decrypt_file, full, tmp, dek)
         await asyncio.to_thread(os.replace, tmp, target)
     except Exception:
