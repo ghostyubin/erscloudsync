@@ -309,15 +309,7 @@ async def _crypto_payload() -> dict:
     enc_tasks = [t["name"] for t in tasks if int(t.get("enc_enabled") or 0)]
     state["tasks"] = len(enc_tasks)
     state["task_names"] = enc_tasks[:5]
-    # 文件头里是否附带「钥匙牌」——开着才能只凭密码解密（和 Synology 一致）
-    state["include_keyblock"] = str(
-        await db.db_get_setting(crypto.INCLUDE_BLOCK_KEY, "1")).strip().lower() \
-        not in ("0", "false", "no", "off")
     return state
-
-
-class CryptoOptions(BaseModel):
-    include_keyblock: Optional[bool] = None
 
 
 @router.get("/crypto")
@@ -344,17 +336,6 @@ async def crypto_unlock(req: CryptoPassword):
     if not result.get("ok"):
         raise HTTPException(400, result.get("message") or "密码不正确")
     return {**result, "state": await _crypto_payload()}
-
-
-@router.post("/crypto/options")
-async def crypto_options(req: CryptoOptions):
-    """改加密的显示/安全选项。目前只有「文件头是否附带钥匙牌」。"""
-    if req.include_keyblock is not None:
-        await db.db_set_setting(crypto.INCLUDE_BLOCK_KEY,
-                                "1" if req.include_keyblock else "0")
-        # 缓存里存的是拼好的头，改了设置必须让它们失效
-        crypto.keyring.forget_blocks()
-    return await _crypto_payload()
 
 
 @router.post("/crypto/export")

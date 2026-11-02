@@ -1685,9 +1685,6 @@ const App = {
         if (unlLabel) unlLabel.textContent = '输入密码解锁';
         show('setting-crypto-change-btn', initialized && unlocked);
         show('setting-crypto-export-btn', initialized && unlocked);
-        show('setting-crypto-block-row', initialized);
-        const blk = el('setting-crypto-block');
-        if (blk) blk.checked = st.include_keyblock !== false;
 
         if (badge) {
             let text = '未设置', color = 'var(--text-secondary)';
@@ -1755,19 +1752,6 @@ const App = {
         if (row) row.style.display = open ? '' : 'none';
         if (confirmBtn) confirmBtn.style.display = open ? '' : 'none';
         this._cryptoResult('', true);
-    },
-
-    async saveCryptoBlockOption(on) {
-        try {
-            const st = await this.api('POST', '/api/system/crypto/options',
-                                      { include_keyblock: !!on });
-            this._applyCryptoState(st);
-            this._cryptoResult(on ? '之后新加密的文件可以只凭密码解密'
-                                  : '之后新加密的文件只能用私钥 / 密钥包解密', true);
-        } catch (e) {
-            this._cryptoResult(e.message, false);
-            this._applyCryptoState(await this.api('GET', '/api/system/crypto'));
-        }
     },
 
     toggleCryptoExport() {

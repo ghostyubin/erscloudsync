@@ -235,6 +235,9 @@ async def init_db():
             "UPDATE tasks SET syno_pubkey = '', syno_priv_wrapped = ''"
             " WHERE syno_pubkey <> '' OR syno_priv_wrapped <> ''",
             "DELETE FROM settings WHERE key = 'crypto_syno_password'",
+            # 「文件头附带钥匙牌」不再是开关：关掉它会让跨机器解密失效，
+            # 而那正是解密页存在的意义。残留的旧值一并清掉。
+            "DELETE FROM settings WHERE key = 'crypto_include_keyblock'",
         ):
             try:
                 await db.execute(stmt)

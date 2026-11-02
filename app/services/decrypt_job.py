@@ -192,8 +192,8 @@ def verify_password(src: str, password: str,
         return
 
     raise DecryptJobError(
-        "这些文件头里没有钥匙牌，只能靠任务私钥文件或密钥包解密，"
-        "不能用密码直接解（加密时把「文件头附带密钥」关掉了）")
+        "这些文件头里没有钥匙牌（是很早以前的版本加密的），只能靠任务私钥"
+        "文件或密钥包解密，不能用密码直接解")
 
 
 @dataclass

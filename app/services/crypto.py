@@ -73,8 +73,6 @@ SUFFIX_PLAIN = ".bsenc.dec.part"
 SALT_KEY = "crypto_salt"
 VERIFIER_KEY = "crypto_verifier"
 SEALED_KEY = "crypto_sealed_kek"
-# 文件头里是否附带「钥匙牌」（让只凭密码也能解密）。默认开，和 Synology 一致。
-INCLUDE_BLOCK_KEY = "crypto_include_keyblock"
 VERIFY_PLAIN = b"bsenc-verify-v1"
 KEYFILE = DATA_DIR / "enc.key"
 
@@ -126,8 +124,8 @@ def build_key_block(task_id: int, salt: bytes, wrapped: str) -> bytes:
 
     代价必须说清楚：云端密文里因此带了一份「可以离线验证密码猜想」的样本。
     每猜一次都要跑一遍 scrypt（32MB / 0.1 秒级），强密码下不构成实际威胁，
-    但这确实比「云端什么都不给」弱一档。不想要，可以在设置里关掉
-    「文件头附带密钥」（关掉之后就只能用私钥文件或密钥包解密）。
+    但这确实比「云端什么都不给」弱一档。**这个代价是固定的，没有开关**：
+    去掉它跨机器解密就不成立，密码本身要够强。
     """
     raw = _unb64(wrapped)
     body = KEYBLOCK.pack(task_id, salt, len(raw)) + raw
@@ -581,12 +579,14 @@ class Keyring:
     async def block_for(self, task: dict) -> Optional[bytes]:
         """拼出写进文件头的「钥匙牌」，让只凭密码也能解密。
 
-        关掉 ``include_key_block`` 设置后返回 None，文件里就只有密文，
-        必须靠私钥文件 / 密钥包 / 数据库才能解开。
+        这里**恒定**附带，没有开关。曾经有过一个 ``crypto_include_keyblock``
+        设置可以关掉它，但那样一来密文就只有本机数据库（或拿着私钥文件的人）
+        能解，换台机器输同样的密码会报「密钥不对」——跨机器解密直接废掉，
+        省下的那 84 字节毫无意义。所以开关连同设置项一起删了。
+
+        返回 None 只在一种情况下发生：任务还没有包裹好的 DEK，或者还没设过
+        密码（没有 salt），此时本来就无从拼装。
         """
-        if str(await db.db_get_setting(INCLUDE_BLOCK_KEY, "1")).strip().lower() \
-                in ("0", "false", "no", "off"):
-            return None
         task_id = int(task["id"])
         cached = self._blocks.get(task_id)
         if cached:
