@@ -12,6 +12,11 @@ realtime 任务在拷贝大目录时会连续触发几十轮扫描，每轮都�
 静默期把「这一波」合并成一条：某个文件夹只要有文件在动，就把它的计时器
 往后推；连续 ``quiet`` 秒没有新文件才算这一波结束，此时推一条汇总。
 
+**但静默不等于同步结束**（踩过）：上传卡在一个大文件、分片在排队、百度限流，
+都会让某个文件夹 30 秒甚至几分钟没有新文件完成，而整轮同步其实还早。所以
+推送还要过一道闸——该任务必须已经跑完（``end_cycle``）。任务在跑期间最多每
+30 分钟发一条「⏳ 同步进行中」的阶段性进度，绝不能写「✅ 传输完成」。
+
 线程/协程模型
 -------------
 ``record()`` / ``record_noop()`` 是纯内存同步方法，由同步引擎在文件完成时
@@ -300,6 +305,9 @@ class FolderBatch:
     # 否则一个安静的文件夹每轮扫描都会冒出一条「同步完成 0 个文件」。
     has_activity: bool = False
     error: str = ""
+    # 发送时该文件夹所属的任务仍在跑：这条只是阶段性进度，绝不能写「传输完成」。
+    # 上传卡在一个大文件上、或分片排队超过静默期时，旧逻辑会误报完成。
+    in_progress: bool = False
     # 只留前几个文件名：单个文件时直接显示它，失败时点名是哪个出错。
     # 上限 3 是为了消息不被文件名刷屏，也避免长任务攒出一个大列表。
     files: list = field(default_factory=list)
@@ -318,6 +326,8 @@ class FolderBatch:
             return "❌ 同步失败"
         if self.failed:
             return f"⚠️ {self.failed} 个文件失败"
+        if self.in_progress:
+            return "⏳ 同步进行中"
         return "✅ 传输完成"
 
     def body(self) -> str:
@@ -371,6 +381,8 @@ class FolderBatch:
             tail.append(f"用时 {fmt_duration(self.last_at - self.first_at)}")
         # 带年月日：多条通知堆在一起时，只看 21:16 分不清是哪天的
         tail.append(datetime.now().strftime("%Y-%m-%d %H:%M"))
+        if self.in_progress:
+            lines.append("同步仍在进行，这是阶段性进度")
         lines.append(" · ".join(tail))
 
         if self.error or self.failed:
@@ -465,8 +477,30 @@ class Notifier:
         self._loop_task: Optional[asyncio.Task] = None
         self._cfg: Optional[NotifyConfig] = None
         self._cfg_at: float = 0.0
+        # 正在跑同步的任务 id。通知的「完成」必须以任务真的结束为准，
+        # 不能只看「这个文件夹 30 秒没有新文件」——上传卡在一个大文件、
+        # 分片排队、百度限流时都会出现这种假静默。
+        self._running: set[int] = set()
         # 供界面「测试发送」和排查用：最近一次发送的结果
         self.last_result: dict = {}
+
+    # -- 任务运行态 -------------------------------------------------------
+
+    def begin_cycle(self, task_id: int) -> None:
+        """同步引擎开跑时调用。纯内存，必须在任何 record() 之前。"""
+        self._running.add(task_id)
+
+    def end_cycle(self, task_id: int) -> None:
+        """同步引擎收尾（含异常路径）时调用，放在 finally 里保证配对。"""
+        self._running.discard(task_id)
+
+    @staticmethod
+    def _task_id_of(key: str) -> int:
+        """桶 key 形如 ``1:2026-11-6xxx`` / ``1:__error__``。"""
+        try:
+            return int(key.split(":", 1)[0])
+        except (ValueError, IndexError):
+            return -1
 
     # -- 生命周期 ---------------------------------------------------------
 
@@ -515,30 +549,32 @@ class Notifier:
         return "", base
 
     def _bucket(self, task_id: int, task_name: str, local_base: str,
-                rel_path: str, cycle_started: float) -> FolderBatch:
+                rel_path: str) -> FolderBatch:
+        """取（或建）这个文件夹「这一波」的汇总桶。
+
+        ``first_at`` 必须是这一波第一次真正有文件完成的时刻，**不能**填
+        ``progress.started_at``（整轮同步开始）。否则一轮同步跑了半小时之后
+        才新建的桶，一出生就满足 MAX_BATCH_DELAY，于是每 5 秒被推走一次，
+        用户会收到一连串「共 2 个文件 · 用时 31 分 · ✅ 传输完成」。
+        """
         folder, label = self.folder_of(local_base, rel_path)
         key = f"{task_id}:{folder}"
         batch = self._pending.get(key)
         now = time.time()
         if batch is None:
-            started = cycle_started or now
             batch = FolderBatch(key=key, label=label, task_name=task_name,
-                                first_at=started, last_at=now)
+                                first_at=now, last_at=now)
             self._pending[key] = batch
         return batch
 
     def record(self, *, task_id: int, task_name: str, local_base: str,
-               rel_path: str, action: str, ok: bool, size: int = 0,
-               cycle_started: float = 0.0) -> None:
+               rel_path: str, action: str, ok: bool, size: int = 0) -> None:
         """记一个「真的动过」的文件。由同步引擎在文件完成后调用。"""
         try:
-            batch = self._bucket(task_id, task_name, local_base, rel_path,
-                                 cycle_started)
+            batch = self._bucket(task_id, task_name, local_base, rel_path)
             now = time.time()
             batch.has_activity = True
             batch.last_at = now
-            if cycle_started:
-                batch.first_at = min(batch.first_at, cycle_started)
             name = _basename(rel_path)
             # 记「涉及哪个文件夹」：成功失败都要算，否则全失败的那波会显示 0 个文件夹
             sub = _subdir_of(rel_path)
@@ -560,7 +596,7 @@ class Notifier:
             logger.debug("notifier.record failed", exc_info=True)
 
     def record_noop(self, *, task_id: int, task_name: str, local_base: str,
-                    rel_paths, cycle_started: float = 0.0) -> None:
+                    rel_paths) -> None:
         """记「无变化」的文件数，只用于消息里的计数，不触发推送。"""
         if not rel_paths:
             return
@@ -574,7 +610,7 @@ class Notifier:
             for folder, count in counts.items():
                 batch = self._pending.get(f"{task_id}:{folder}")
                 if batch is None:
-                    started = cycle_started or time.time()
+                    started = time.time()
                     batch = FolderBatch(key=f"{task_id}:{folder}",
                                         label=labels[folder],
                                         task_name=task_name,
@@ -648,11 +684,20 @@ class Notifier:
                     self._pending.pop(key, None)
                 continue
 
-            due = (now - batch.last_at >= cfg.quiet
-                   or now - batch.first_at >= MAX_BATCH_DELAY)
-            if not due:
+            running = self._task_id_of(batch.key) in self._running
+            quiet_due = now - batch.last_at >= cfg.quiet
+            # 一轮同步可能连着跑几小时（几千个文件）。期间最多每
+            # MAX_BATCH_DELAY 给一条阶段性进度，但状态必须写「进行中」。
+            # abort_task 会把 last_at 置 0，整轮报错必须立刻发，不等任务收尾。
+            force_progress = now - batch.first_at >= MAX_BATCH_DELAY
+            if running and not (force_progress or batch.error):
+                # 任务还在跑，30 秒没新文件只是「假静默」：可能正卡在一个
+                # 大文件、分片在排队、或百度限流。此时报「传输完成」是误报。
+                continue
+            if not (quiet_due or force_progress or batch.error):
                 continue
 
+            batch.in_progress = running and not batch.error
             ok, detail = await self._send(cfg, batch)
             if ok:
                 self._pending.pop(key, None)
@@ -811,6 +856,7 @@ class Notifier:
     def snapshot(self) -> dict:
         """给界面/排查用：当前排队的桶。"""
         return {
+            "running_tasks": sorted(self._running),
             "pending": [
                 {"folder": b.label, "task": b.task_name,
                  "uploads": b.uploads, "downloads": b.downloads,

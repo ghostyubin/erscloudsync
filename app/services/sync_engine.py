@@ -321,6 +321,9 @@ class SyncEngine:
         await db.db_add_log(task_id, "info", detail=f"Sync started: {task['name']}")
 
         try:
+            # 通知要按「任务是否真的结束」来判断能不能报完成。必须早于任何
+            # notifier.record()，且 end_cycle 一定要落在 finally 里。
+            notifier.begin_cycle(task_id)
             # 提前给默认值：下面除了连接失败还会在更早的地方抛异常，
             # except 分支里的通知要用到它
             local_base = ""
@@ -423,8 +426,7 @@ class SyncEngine:
                 task_id=task_id, task_name=task["name"], local_base=local_base,
                 rel_paths=[op.rel_path for op in operations
                            if op.action == SyncAction.SKIP
-                           and op.reason == "No changes" and op.rel_path],
-                cycle_started=progress.started_at)
+                           and op.reason == "No changes" and op.rel_path])
 
             progress.phase = "executing"
             await db.db_add_log(task_id, "info", detail=(
@@ -461,8 +463,7 @@ class SyncEngine:
                         task_id=task_id, task_name=task["name"],
                         local_base=local_base, rel_path=rel,
                         action=op.action.value, ok=ok,
-                        size=(op.file_info.size or 0) if op.file_info else 0,
-                        cycle_started=progress.started_at)
+                        size=(op.file_info.size or 0) if op.file_info else 0)
                 except Exception:  # noqa: BLE001 - 统计不能拖垮同步
                     logger.debug("notify track failed for %s", op.local_path,
                                  exc_info=True)
@@ -554,6 +555,7 @@ class SyncEngine:
         finally:
             progress.is_running = False
             progress.phase = "done"
+            notifier.end_cycle(task_id)
             cls._running_tasks.discard(task_id)
             cls._stop_requested.discard(task_id)
             cls._cancelled_transfers.pop(task_id, None)
