@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import WEB_HOST, WEB_PORT, FRONTEND_DIR, LOCAL_SYNC_ROOT, LOG_DIR
@@ -148,11 +148,20 @@ if static_dir.exists():
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    """Serve the main HTML page."""
+    """Serve the main HTML page.
+
+    静态资源的 URL 带上了 ``APP_VERSION``：镜像一升级，CSS/JS 的地址就变，
+    浏览器不用硬刷新也会去拿新的。以前改过布局但用户仍看到旧样式，多半是
+    Safari/Chrome 把 style.css 缓存住了——这里既给资源加版本，也要求 HTML
+    本身每次协商一遍。
+    """
     index_path = FRONTEND_DIR / "index.html"
-    if index_path.exists():
-        return FileResponse(str(index_path))
-    return HTMLResponse("<h1>BauduSync</h1><p>Frontend not found.</p>")
+    if not index_path.exists():
+        return HTMLResponse("<h1>BauduSync</h1><p>Frontend not found.</p>")
+    html = index_path.read_text(encoding="utf-8")
+    for asset in ("/static/css/style.css", "/static/js/app.js"):
+        html = html.replace(f'"{asset}"', f'"{asset}?v={APP_VERSION}"')
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api")
