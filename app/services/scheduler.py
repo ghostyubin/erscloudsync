@@ -9,11 +9,14 @@ from typing import Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+from watchdog.events import (
+    DirCreatedEvent, DirMovedEvent, FileSystemEventHandler,
+)
 
 from app.services.sync_engine import SyncEngine, DEFAULT_EXCLUDE_PATTERNS
 from app import database as db
-from app.config import LOCAL_SYNC_ROOT, DOWNLOAD_DIR, REALTIME_MAX_DELAY, REALTIME_WRITE_GRACE
+from app.config import (DOWNLOAD_DIR, LOCAL_SYNC_ROOT, REALTIME_MAX_DELAY,
+                        REALTIME_SWEEP, REALTIME_WRITE_GRACE)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -42,6 +45,16 @@ class FileChangeHandler(FileSystemEventHandler):
 
     def on_any_event(self, event):
         if event.is_directory:
+            # 目录事件也算「可能有东西进来了」。watchdog 6.0 的 inotify_c.py
+            # 里挂着一条 TODO：**整个目录从别处移进被监听目录**时（IN_MOVED_TO），
+            # 它只合成一个 DirCreatedEvent，却不会给这棵树补 inotify watch，
+            # 于是里面以后再怎么写都收不到事件。最常见的场景就是用户把整批
+            # 照片文件夹拖进 /sync——这次踩的就是这个。
+            # 收到就排一轮扫描，把已经落地的东西传上去；拷贝还在继续的部分
+            # 由 SyncScheduler 的巡检兜底。
+            if isinstance(event, (DirCreatedEvent, DirMovedEvent)):
+                self._last_trigger = time.time()
+                self._loop.call_soon_threadsafe(self._schedule_debounced_sync)
             return
         # Ignore the files the sync engine never uploads anyway. Our own
         # downloads write "<name>.part" before the atomic rename, so without
@@ -116,6 +129,10 @@ class FileChangeHandler(FileSystemEventHandler):
                 self._batch_started = time.time()
                 started = self._batch_started
                 logger.info(f"File change detected, triggering sync for task {self.task_id}")
+                # 顺手把指纹更新掉：巡检看到同一棵树就不会再为这批文件补一轮
+                if REALTIME_SWEEP > 0:
+                    _TREE_FP[self.task_id] = await asyncio.to_thread(
+                        tree_fingerprint, self.local_path)
                 await SyncEngine.sync_task(self.task_id, write_grace=self.write_grace)
                 # Events that arrive while the sync runs are not queued
                 # anywhere (_schedule_debounced_sync returns early because this
@@ -138,6 +155,35 @@ class FileChangeHandler(FileSystemEventHandler):
         """Stop the debounce loop (called when the task is unscheduled)."""
         if self._debounce_task and not self._debounce_task.done():
             self._debounce_task.cancel()
+
+
+def tree_fingerprint(base_path: str) -> tuple:
+    """本地目录的廉价指纹：文件数、总字节、最新 mtime。
+
+    只用来看「这棵树变没变」，所以不读内容、不联网。目录刚被拷贝完时
+    mtime 会一直变，指纹自然也跟着变，正好可以在拷完之后触发一轮同步。
+    """
+    count = 0
+    total = 0
+    newest = 0.0
+    for root, _dirs, files in os.walk(base_path):
+        for name in files:
+            if any(fnmatch.fnmatch(name, pat) for pat in DEFAULT_EXCLUDE_PATTERNS):
+                continue
+            try:
+                st = os.stat(os.path.join(root, name))
+            except OSError:
+                continue
+            count += 1
+            total += st.st_size
+            if st.st_mtime > newest:
+                newest = st.st_mtime
+    return (count, total, round(newest, 3))
+
+
+# 每个实时任务「上一轮同步开始时」的目录指纹。事件触发和兜底巡检共用这一份，
+# 谁先跑谁更新，另一个就不会为同一批文件再跑一遍。
+_TREE_FP: dict[int, tuple] = {}
 
 
 class SyncScheduler:
@@ -180,6 +226,7 @@ class SyncScheduler:
                 pass
         self._observers.clear()
         self._handlers.clear()
+        _TREE_FP.clear()
         if self._started:
             self._scheduler.shutdown()
             self._started = False
@@ -215,12 +262,55 @@ class SyncScheduler:
                 self._handlers[task_id] = handler
                 logger.info(f"Task {task_id} watching {local_base} for changes")
 
+                # 记下启动时的指纹，巡检才有比较的基准。必须在下面那轮同步
+                # 之前取，否则任务一开始下载就把基准带偏了。
+                if REALTIME_SWEEP > 0:
+                    _TREE_FP[task_id] = await asyncio.to_thread(
+                        tree_fingerprint, local_base)
+                    self._scheduler.add_job(
+                        self._sweep_realtime,
+                        IntervalTrigger(seconds=max(15, int(REALTIME_SWEEP))),
+                        args=[task_id],
+                        id=f"sweep_{task_id}",
+                        replace_existing=True,
+                    )
+                    logger.info(
+                        f"Task {task_id} safety sweep every "
+                        f"{int(REALTIME_SWEEP)}s")
+
                 # Run initial sync in background — don't block app startup.
                 # If we await here, uvicorn stays stuck on "Waiting for
                 # application startup" and never starts listening on the port.
                 # No write_grace here: the startup pass is the catch-up pass,
                 # and a file skipped now might never get another event.
                 SyncEngine.spawn(task_id)
+
+    async def _sweep_realtime(self, task_id: int):
+        """实时任务的兜底巡检：本地目录变了就补跑一轮。
+
+        inotify 会漏：整目录移进来时不补 watch（watchdog 6.0 的 TODO）、
+        拷贝量太大时事件可能丢、observer 线程万一挂掉就彻底哑了。这些情况
+        下没有任何事件，实时同步会安静地停在那里——用户看不出区别，只会
+        觉得「拷完了却没同步」。这里每隔一会儿本地数一遍，变了就补跑。
+        """
+        task = await db.db_get_task(task_id)
+        if not task:
+            return
+        base_path = self._resolve_local_base(task["local_path"])
+        try:
+            fp = await asyncio.to_thread(tree_fingerprint, base_path)
+        except Exception as e:  # noqa: BLE001 - 巡检坏掉不该影响别的任务
+            logger.warning(f"Safety sweep for task {task_id} failed: {e}")
+            return
+        if _TREE_FP.get(task_id) == fp:
+            return
+        if SyncEngine.is_running(task_id):
+            return          # 这轮跑完再比，别把指纹改成「下一轮不触发」
+        _TREE_FP[task_id] = fp
+        logger.info(
+            f"Local tree changed without a file event, "
+            f"triggering sync for task {task_id} ({fp[0]} files, {fp[1]} bytes)")
+        SyncEngine.request_sync(task_id, write_grace=REALTIME_WRITE_GRACE)
 
     @staticmethod
     def _resolve_local_base(local_path: str) -> str:
@@ -246,6 +336,11 @@ class SyncScheduler:
             self._scheduler.remove_job(f"task_{task_id}")
         except Exception:
             pass
+        try:
+            self._scheduler.remove_job(f"sweep_{task_id}")
+        except Exception:
+            pass
+        _TREE_FP.pop(task_id, None)
 
         # Stop file observer
         if task_id in self._observers:

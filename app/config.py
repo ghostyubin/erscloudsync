@@ -40,6 +40,13 @@ REALTIME_MAX_DELAY = float(os.environ.get("BAUDUSYNC_REALTIME_MAX_DELAY", "30"))
 # above would upload a half-copied photo and push it again once it is complete.
 REALTIME_WRITE_GRACE = float(os.environ.get("BAUDUSYNC_WRITE_GRACE", "3"))
 
+# 兜底巡检间隔（秒）。inotify 不是万无一失的：watchdog 6.0 里有个公开的
+# TODO——整个目录「移进」被监听的目录时（IN_MOVED_TO），它不会给这棵树补
+# watch，于是里面的文件改了也收不到任何事件；大目录拷贝也可能丢事件。
+# 所以每隔这么久本地数一遍目录（只 stat，不联网），和上次触发时的指纹比，
+# 变了就补跑一轮同步。0 = 关掉巡检，只依赖 inotify。
+REALTIME_SWEEP = float(os.environ.get("BAUDUSYNC_REALTIME_SWEEP", "120"))
+
 # --- 同步完成通知（默认值，界面里保存过的以数据库为准） ---
 # 网关地址填到域名即可，代码会拼上 /push（兼容 Heimdallr 的 POST /push）。
 NOTIFY_DEFAULT_URL = os.environ.get("BAUDUSYNC_NOTIFY_URL", "")
