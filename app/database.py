@@ -113,6 +113,25 @@ CREATE TABLE IF NOT EXISTS sync_logs (
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
 
+-- 运行日志：Python logging 里的 WARNING/ERROR（风控、连接重置、重试退避、
+-- token 失效…）。以前这些只进容器 stdout 和 /config/log/baudusync.log，
+-- 前端日志页只查 sync_logs，所以「百度限流了」在网页上永远看不见。
+-- 独立一张表而不是塞进 sync_logs：那边每行绑定一个 task_id + 业务动作，
+-- 且「清除日志」是清业务记录，不该把系统告警一起抹掉。
+-- occurrences 是同类事件在聚合窗口内发生的次数，避免风控时刷出几十行。
+CREATE TABLE IF NOT EXISTS runtime_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    level TEXT NOT NULL CHECK(level IN ('warning', 'error')),
+    category TEXT NOT NULL DEFAULT '其他告警',
+    source TEXT NOT NULL DEFAULT '',
+    message TEXT NOT NULL,
+    occurrences INTEGER NOT NULL DEFAULT 1,
+    first_at REAL NOT NULL,
+    last_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_logs_last ON runtime_logs(last_at);
+
 CREATE TABLE IF NOT EXISTS sync_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id INTEGER NOT NULL,
@@ -544,6 +563,97 @@ async def db_clear_all_logs():
 async def db_clear_task_logs(task_id: int):
     async with aiosqlite.connect(str(DB_PATH)) as db:
         await db.execute("DELETE FROM sync_logs WHERE task_id = ?", (task_id,))
+        await db.commit()
+
+
+# ---- Runtime logs (system warnings / errors shown in the UI) ----
+
+# 同一条告警在这个时间窗内只累加次数，不新增行。百度风控时一次能连着
+# 打十几条一样的 warning，逐条落库会把前端日志刷满。
+RUNTIME_LOG_WINDOW = 60.0
+# 这张表最多保留多少行（网络长期抖动时防止无限增长）
+RUNTIME_LOG_KEEP = 2000
+
+
+async def db_merge_runtime_logs(entries: list[dict]) -> None:
+    """把一批已聚合的运行告警写库。
+
+    ``entries`` 每项含 level/category/source/message/count/first_at/last_at。
+    完全相同的内容在 ``RUNTIME_LOG_WINDOW`` 秒内合并成一行，累加 occurrences。
+    """
+    if not entries:
+        return
+    now = time.time()
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        for e in entries:
+            last_at = float(e.get("last_at") or now)
+            cursor = await db.execute(
+                """SELECT id, occurrences FROM runtime_logs
+                   WHERE level = ? AND category = ? AND source = ? AND message = ?
+                     AND last_at >= ?
+                   ORDER BY id DESC LIMIT 1""",
+                (e["level"], e["category"], e["source"], e["message"],
+                 last_at - RUNTIME_LOG_WINDOW),
+            )
+            row = await cursor.fetchone()
+            count = max(1, int(e.get("count", 1)))
+            if row:
+                await db.execute(
+                    "UPDATE runtime_logs SET occurrences = ?, last_at = ? WHERE id = ?",
+                    (row[1] + count, last_at, row[0]),
+                )
+            else:
+                await db.execute(
+                    """INSERT INTO runtime_logs
+                       (level, category, source, message, occurrences, first_at, last_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (e["level"], e["category"], e["source"], e["message"],
+                     count, float(e.get("first_at") or last_at), last_at),
+                )
+        # 只留最近 N 行，避免这张表在长期网络抖动下无限涨
+        await db.execute(
+            """DELETE FROM runtime_logs WHERE id NOT IN
+               (SELECT id FROM runtime_logs ORDER BY id DESC LIMIT ?)""",
+            (RUNTIME_LOG_KEEP,),
+        )
+        await db.commit()
+
+
+async def db_list_runtime_logs(limit: int = 500, offset: int = 0,
+                               level: str = "", category: str = "") -> list[dict]:
+    """最近的运行告警，按最后发生时间倒序。"""
+    clauses: list[str] = []
+    args: list[Any] = []
+    if level:
+        clauses.append("level = ?")
+        args.append(level)
+    if category:
+        clauses.append("category = ?")
+        args.append(category)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    args.extend((limit, offset))
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM runtime_logs" + where
+            + " ORDER BY last_at DESC, id DESC LIMIT ? OFFSET ?",
+            tuple(args),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def db_count_runtime_logs() -> int:
+    """库里的运行告警条数（不受筛选影响，用于前端 tab 上的小红点）。"""
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        cursor = await db.execute("SELECT COUNT(*) FROM runtime_logs")
+        row = await cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
+async def db_clear_runtime_logs():
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        await db.execute("DELETE FROM runtime_logs")
         await db.commit()
 
 

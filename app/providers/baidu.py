@@ -94,6 +94,24 @@ DOWNLOAD_CHUNK_SIZE = 256 * 1024  # 256KB chunks for download progress reporting
 EMPTY_FILE_MD5 = "d41d8cd98f00b204e9800998ecf8427e"
 
 
+def _non_json_error(what: str, text: str) -> RuntimeError:
+    """百度偶尔直接吐一个 HTML 错误页（限流/风控/临时故障）而不是 JSON。
+
+    旧文案 ``API returned non-JSON: <!DOCTYPE html>...`` 既看不出原因，前端
+    日志也没法归类。把判断写进异常文本后，容器日志和运行日志都能一眼看出
+    「是被限流了」，而不是让人以为是程序解析坏了。
+    """
+    snippet = (text or "").strip()
+    low = snippet.lower()
+    if "<!doctype html" in low or "<html" in low or "error_all" in low:
+        hint = "百度返回了错误网页，通常是触发限流/风控或服务临时异常"
+    elif "trigger security policy" in low:
+        hint = "触发百度安全策略/风控"
+    else:
+        hint = "响应体不是 JSON"
+    return RuntimeError(f"{what}：{hint}；原文 {snippet[:300]}")
+
+
 class BaiduProvider(CloudProvider):
     """Baidu Netdisk provider using Pan Open API."""
 
@@ -229,7 +247,7 @@ class BaiduProvider(CloudProvider):
             try:
                 data = json.loads(text)
             except json.JSONDecodeError:
-                raise RuntimeError(f"API returned non-JSON: {text[:500]}")
+                raise _non_json_error("百度接口返回非 JSON", text)
             errno = data.get("errno")
             if errno and errno == -6 and attempt == 1 and self.refresh_token:
                 logger.info("Baidu token rejected (errno -6), forcing refresh")
@@ -254,7 +272,7 @@ class BaiduProvider(CloudProvider):
             try:
                 result = json.loads(text)
             except json.JSONDecodeError:
-                raise RuntimeError(f"API returned non-JSON: {text[:500]}")
+                raise _non_json_error("百度接口返回非 JSON", text)
             errno = result.get("errno")
             if errno and errno == -6 and attempt == 1 and self.refresh_token:
                 logger.info("Baidu token rejected (errno -6), forcing refresh")
@@ -502,7 +520,7 @@ class BaiduProvider(CloudProvider):
                 try:
                     data = json.loads(text)
                 except json.JSONDecodeError:
-                    raise RuntimeError(f"Precreate returned non-JSON: {text[:200]}")
+                    raise _non_json_error("precreate 返回非 JSON", text)
                 if data.get("errno"):
                     raise RuntimeError(f"Precreate failed: {data}")
                 created_uploadid = data.get("uploadid")
@@ -552,8 +570,7 @@ class BaiduProvider(CloudProvider):
                 try:
                     block_data_resp = json.loads(text)
                 except json.JSONDecodeError:
-                    raise RuntimeError(
-                        f"Block {idx} upload returned non-JSON: {text[:200]}")
+                    raise _non_json_error(f"分片 {idx} 上传返回非 JSON", text)
                 if block_data_resp.get("error_code"):
                     raise RuntimeError(
                         f"Block {idx} upload failed: {block_data_resp}")
@@ -634,7 +651,7 @@ class BaiduProvider(CloudProvider):
                 try:
                     data = json.loads(text)
                 except json.JSONDecodeError:
-                    raise RuntimeError(f"Create returned non-JSON: {text[:200]}")
+                    raise _non_json_error("create 返回非 JSON", text)
                 if data.get("errno"):
                     raise RuntimeError(f"Create failed: {data}")
                 return True

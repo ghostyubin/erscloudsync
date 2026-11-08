@@ -2325,10 +2325,27 @@ const App = {
         } catch (e) { this.toast('删除失败: ' + e.message, 'error'); }
     },
 
-    // ---- Logs (aggregated, all tasks) ----
+    // ---- Logs ----
+    // sync = 每个文件一条的业务日志；runtime = 风控/断连/重试等运行告警
     _lastLogsHtml: '',
+    _logTab: 'sync',
+
+    switchLogTab(tab) {
+        this._logTab = tab;
+        const isRuntime = tab === 'runtime';
+        document.getElementById('log-tab-sync')?.classList.toggle('active', !isRuntime);
+        document.getElementById('log-tab-runtime')?.classList.toggle('active', isRuntime);
+        const cat = document.getElementById('runtime-category');
+        const raw = document.getElementById('btn-raw-log');
+        if (cat) cat.style.display = isRuntime ? '' : 'none';
+        if (raw) raw.style.display = isRuntime ? '' : 'none';
+        this._lastLogsHtml = '';
+        this.loadLogs();
+    },
 
     async loadLogs(isAutoRefresh = false) {
+        if (this._logTab === 'runtime') return this.loadRuntimeLogs(isAutoRefresh);
+        if (!isAutoRefresh) this._updateRuntimeBadge();
         const container = document.getElementById('logs-container');
         if (!container) return;
         // Only show loading placeholder on manual load, not on auto-refresh
@@ -2382,11 +2399,75 @@ const App = {
         }
     },
 
-    async clearAllLogs() {
-        if (!confirm('确定清除所有日志？此操作不可撤销。')) return;
+    async loadRuntimeLogs(isAutoRefresh = false) {
+        const container = document.getElementById('logs-container');
+        if (!container) return;
+        if (!isAutoRefresh) container.innerHTML = '<div class="empty-state">加载中...</div>';
         try {
-            await this.api('DELETE', '/api/logs');
-            this.toast('日志已清除', 'success');
+            const cat = document.getElementById('runtime-category')?.value || '';
+            const data = await this.api('GET', `/api/logs/runtime?limit=500&category=${encodeURIComponent(cat)}`);
+            const logs = data.logs || [];
+            this._updateRuntimeBadge(data.total);
+            if (logs.length === 0) {
+                this._lastLogsHtml = '';
+                container.innerHTML = '<div class="empty-state">暂无运行告警' + (cat ? '（当前分类）' : '') +
+                    '<br><span style="color:var(--text-secondary);font-size:12px">这里会显示百度限流/风控、连接重置、重试退避、授权失效等异常</span></div>';
+                return;
+            }
+            const html = logs.map(log => {
+                const levelLabel = log.level === 'error' ? '错误' : '告警';
+                const timespan = (log.first_at && log.last_at > log.first_at)
+                    ? `${this.formatTime(log.first_at)} → ${this.formatTime(log.last_at)}` : '';
+                const count = log.occurrences > 1
+                    ? `<span class="rt-count" title="这段时间内累计发生次数">×${log.occurrences}</span>` : '';
+                return `
+                    <div class="log-entry runtime">
+                        <span class="log-time" title="${this.escape(timespan)}">${this.formatTime(log.last_at)}</span>
+                        <span class="rt-level ${this.escape(log.level)}">${levelLabel}</span>
+                        <span class="rt-category">${this.escape(log.category)}</span>
+                        <span class="rt-source">${this.escape(log.source)}</span>
+                        ${count}
+                        <span class="log-detail">${this.escape(log.message || '')}</span>
+                    </div>`;
+            }).join('');
+
+            if (isAutoRefresh && html === this._lastLogsHtml) return;
+            const savedScroll = isAutoRefresh ? container.scrollTop : 0;
+            container.innerHTML = html;
+            this._lastLogsHtml = html;
+            container.scrollTop = savedScroll;
+        } catch (e) {
+            if (!isAutoRefresh) {
+                container.innerHTML = `<div class="empty-state" style="color:#f38ba8">${this.escape(e.message)}</div>`;
+            }
+        }
+    },
+
+    async _updateRuntimeBadge(total) {
+        const badge = document.getElementById('runtime-log-badge');
+        if (!badge) return;
+        if (total === undefined) {
+            try {
+                const d = await this.api('GET', '/api/logs/runtime?limit=1');
+                total = d.total || 0;
+            } catch (e) { return; }
+        }
+        badge.textContent = total > 99 ? '99+' : String(total);
+        badge.style.display = total ? '' : 'none';
+    },
+
+    openRawLog() {
+        // 完整文件日志，含 INFO 与 traceback；浏览器里可直接 Ctrl+F 搜
+        window.open('/api/logs/file/baudusync.log?tail=800', '_blank', 'noopener');
+    },
+
+    async clearAllLogs() {
+        const isRuntime = this._logTab === 'runtime';
+        const label = isRuntime ? '运行告警' : '同步日志';
+        if (!confirm(`确定清除所有${label}？此操作不可撤销。`)) return;
+        try {
+            await this.api('DELETE', isRuntime ? '/api/logs/runtime' : '/api/logs');
+            this.toast(`${label}已清除`, 'success');
             this.loadLogs();
         } catch (e) {
             this.toast('清除失败: ' + e.message, 'error');

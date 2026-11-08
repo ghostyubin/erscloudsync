@@ -574,6 +574,25 @@
                 </div>
             </div>
             <div class="content-area">
+                <div class="log-toolbar">
+                    <div class="conn-tabs log-tabs">
+                        <button id="log-tab-sync" class="conn-tab active" onclick="app.switchLogTab('sync')">同步日志</button>
+                        <button id="log-tab-runtime" class="conn-tab" onclick="app.switchLogTab('runtime')">运行告警<span id="runtime-log-badge" class="log-badge" style="display:none;"></span></button>
+                    </div>
+                    <div class="log-toolbar-right">
+                        <select id="runtime-category" class="select log-category" style="display:none;" onchange="app.loadLogs()">
+                            <option value="">全部分类</option>
+                            <option value="百度网盘限流/风控">百度网盘限流/风控</option>
+                            <option value="网络连接中断">网络连接中断</option>
+                            <option value="网盘接口异常">网盘接口异常</option>
+                            <option value="自动重试">自动重试</option>
+                            <option value="授权失效/刷新">授权失效/刷新</option>
+                            <option value="同步任务异常">同步任务异常</option>
+                            <option value="其他告警">其他告警</option>
+                        </select>
+                        <button id="btn-raw-log" class="btn btn-secondary btn-sm" style="display:none;" title="在浏览器里查看完整日志文件（含 INFO 与堆栈）" onclick="app.openRawLog()">原始日志</button>
+                    </div>
+                </div>
                 <div id="logs-container" class="logs-container">
                     <div class="empty-state">加载中...</div>
                 </div>

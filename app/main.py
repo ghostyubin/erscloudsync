@@ -68,6 +68,14 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing database...")
     await init_db()
 
+    # 运行告警（百度限流、连接重置、重试退避…）以前只进容器日志，
+    # 网页日志页看不到。必须在 init_db() 建表之后挂上 handler。
+    try:
+        from app.services.log_bridge import runtime_log_handler
+        await runtime_log_handler.start()
+    except Exception as e:  # noqa: BLE001 - 桥接坏了不能影响启动
+        logger.warning(f"Could not start runtime log bridge: {e}")
+
     # Ensure sync root exists (skip if it's already a mount point)
     try:
         LOCAL_SYNC_ROOT.mkdir(parents=True, exist_ok=True)
@@ -118,6 +126,12 @@ async def lifespan(app: FastAPI):
     try:
         from app.services.traffic import traffic
         await traffic.flush()
+    except Exception:  # noqa: BLE001
+        pass
+    # 收尾再 flush 一次，把 shutdown 期间产生的告警也落库
+    try:
+        from app.services.log_bridge import runtime_log_handler
+        await runtime_log_handler.stop()
     except Exception:  # noqa: BLE001
         pass
     logger.info("BauduSync stopped.")

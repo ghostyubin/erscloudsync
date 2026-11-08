@@ -2203,6 +2203,59 @@ body {
 .log-action.info { color: #89dceb; }
 .log-action.mkdir_local, .log-action.mkdir_remote { color: #f9e2af; }
 
+/* ---- 运行告警日志（百度限流 / 断连 / 重试） ---- */
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.log-toolbar-right { display: flex; align-items: center; gap: 8px; }
+.log-tabs { padding: 0; border-bottom: 0; gap: 6px; }
+.log-tabs .conn-tab {
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  background: var(--surface);
+}
+.log-tabs .conn-tab.active {
+  border-color: var(--accent);
+  background: var(--accent-light);
+  color: var(--accent);
+}
+.log-badge {
+  display: inline-block;
+  min-width: 18px;
+  padding: 0 5px;
+  margin-left: 4px;
+  border-radius: 9px;
+  background: #f38ba8;
+  color: #1e1e2e;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  line-height: 18px;
+}
+.log-category { width: auto; padding: 7px 10px; font-size: 13px; }
+.log-entry.runtime { align-items: baseline; }
+.rt-level { flex-shrink: 0; width: 42px; font-size: 12px; font-weight: 600; }
+.rt-level.error { color: #f38ba8; }
+.rt-level.warning { color: #f9e2af; }
+.rt-category { flex-shrink: 0; min-width: 132px; color: #cba6f7; font-size: 12px; }
+.rt-source {
+  flex-shrink: 0;
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #6c7086;
+  font-size: 11px;
+}
+.rt-count { flex-shrink: 0; color: #fab387; font-size: 12px; font-weight: 600; }
+
 /* ============================================================
    Toast
    ============================================================ */
@@ -2960,6 +3013,9 @@ details[open] summary::before { transform: rotate(90deg); }
   .log-action { width: auto; }
   .log-task { max-width: none; }
   .log-detail { flex-basis: 100%; }
+  .rt-category, .rt-source { min-width: 0; max-width: none; }
+  .log-toolbar { gap: 8px; }
+  .log-category { flex: 1 1 130px; }
 
   /* --- Sync records ---
      The trigger keeps only its icon (the topbar already holds 新建任务 next to

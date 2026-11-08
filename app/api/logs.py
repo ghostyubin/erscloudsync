@@ -60,6 +60,28 @@ async def clear_all_logs():
     return {"status": "cleared"}
 
 
+@router.get("/runtime")
+async def list_runtime_logs(limit: int = 500, offset: int = 0,
+                            level: str = "", category: str = ""):
+    """运行告警：风控、连接重置、重试退避、授权失效等，按最近发生倒序。
+
+    这些原本只写在容器日志里，前端日志页看不到；由 ``log_bridge`` 落库。
+    """
+    logs = await db.db_list_runtime_logs(
+        limit=max(1, min(limit, 2000)), offset=max(0, offset),
+        level=level, category=category,
+    )
+    return {"logs": logs, "total": await db.db_count_runtime_logs(),
+            "returned": len(logs)}
+
+
+@router.delete("/runtime")
+async def clear_runtime_logs():
+    """只清运行告警，不碰每个文件的同步日志。"""
+    await db.db_clear_runtime_logs()
+    return {"status": "cleared"}
+
+
 @router.get("/files")
 async def list_log_files():
     """List available log files and their sizes."""
